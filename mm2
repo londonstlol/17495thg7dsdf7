@@ -19,11 +19,16 @@ local LocalPlayer = Players.LocalPlayer
 --========================
 -- 🔄 AUTO-EXECUTE ON TELEPORT
 --========================
-local queue_on_teleport = queue_on_teleport or queueonteleport
-if queue_on_teleport then
-	queue_on_teleport([[
-		loadstring(game:HttpGet("https://raw.githubusercontent.com/londonstlol/Keys/refs/heads/main/script"))()
-	]])
+-- Auto-execute on teleport (safe — wrapped in pcall so undefined globals don't crash)
+local _qot = nil
+pcall(function() _qot = queue_on_teleport end)
+pcall(function() if not _qot then _qot = queueonteleport end end)
+if _qot then
+	pcall(function()
+		_qot([[
+			loadstring(game:HttpGet("https://raw.githubusercontent.com/londonstlol/17495thg7dsdf7/refs/heads/main/mm2"))()
+		]])
+	end)
 end
 
 --========================
@@ -2197,8 +2202,7 @@ connections[#connections+1] = RunService.Heartbeat:Connect(function()
 		if d < closestDist then closestDist = d; closest = ph end
 	end
 	if closest and closestDist < 60 then
-		-- Teleport right behind target
-		hrp.CFrame = closest.CFrame * CFrame.new(0, 0, -2.5)
+		pcall(function() hrp.CFrame = closest.CFrame * CFrame.new(0, 0, -2.5) end)
 	end
 end)
 
@@ -2228,8 +2232,7 @@ connections[#connections+1] = RunService.Heartbeat:Connect(function(dt)
 		local phum = pc:FindFirstChildOfClass("Humanoid")
 		if not ph or not phum or phum.Health <= 0 then continue end
 		if (ph.Position - hrp.Position).Magnitude <= killAuraRadius then
-			hrp.CFrame = ph.CFrame * CFrame.new(0, 0, -2)
-			task.wait(0.05)
+			pcall(function() hrp.CFrame = ph.CFrame * CFrame.new(0, 0, -2) end)
 		end
 	end
 end)
@@ -2248,7 +2251,7 @@ connections[#connections+1] = RunService.Heartbeat:Connect(function()
 	for _, part in pairs(knife:GetDescendants()) do
 		if part:IsA("BasePart") then
 			if reachHackEnabled then
-				part.Size = Vector3.new(reachHackValue, reachHackValue, reachHackValue)
+				pcall(function() part.Size = Vector3.new(reachHackValue, reachHackValue, reachHackValue) end)
 			end
 		end
 	end
@@ -2424,7 +2427,7 @@ connections[#connections+1] = RunService.Heartbeat:Connect(function()
 	if not tc then return end
 	local hum = tc:FindFirstChildOfClass("Humanoid")
 	if hum then
-		Workspace.CurrentCamera.CameraSubject = hum
+		pcall(function() Workspace.CurrentCamera.CameraSubject = hum end)
 	end
 end)
 
@@ -2479,6 +2482,8 @@ connections[#connections+1] = RunService.Heartbeat:Connect(function()
 			if #_fakeLagBuffer > 0 then
 				pcall(function() hrp.CFrame = _fakeLagBuffer[1].cf end)
 			end
+			-- Trim buffer to avoid memory bloat
+			while #_fakeLagBuffer > 120 do table.remove(_fakeLagBuffer, 1) end
 		end
 	else
 		_fakeLagBuffer = {}
@@ -2509,7 +2514,7 @@ connections[#connections+1] = RunService.Heartbeat:Connect(function()
 				local n = obj.Name:lower()
 				if obj:IsA("BasePart") and isCoin(n) then
 					pcall(function()
-						hrp.CFrame = CFrame.new(obj.Position)
+						hrp.CFrame = CFrame.new(obj.Position + Vector3.new(0, 3, 0))
 					end)
 					collected = true
 					task.wait(0.05)
