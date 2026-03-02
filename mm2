@@ -1,0 +1,2549 @@
+-- ╔══════════════════════════════════════════════════════════════╗
+-- ║           🌸 SAKURA HUB — Murder Mystery 2 Edition          ║
+-- ║                 Built on Sakura GUI v7 Framework             ║
+-- ╚══════════════════════════════════════════════════════════════╝
+
+-- Services
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace        = game:GetService("Workspace")
+local RunService       = game:GetService("RunService")
+local HttpService      = game:GetService("HttpService")
+
+local SETTINGS_FILE = "sakurahub_mm2_settings.json"
+local saveSettings  -- forward declaration
+
+local LocalPlayer = Players.LocalPlayer
+
+--========================
+-- 🔄 AUTO-EXECUTE ON TELEPORT
+--========================
+local queue_on_teleport = queue_on_teleport or queueonteleport
+if queue_on_teleport then
+	queue_on_teleport([[
+		loadstring(game:HttpGet("https://raw.githubusercontent.com/londonstlol/Keys/refs/heads/main/script"))()
+	]])
+end
+
+--========================
+-- 🔑 KEY SYSTEM
+--========================
+
+local KEY_URL          = "https://raw.githubusercontent.com/londonstlol/Keys/refs/heads/main/Sakura%20keys"
+local MONETIZATION_URL = "https://lootdest.org/s?wk0dkIjV"
+local KEY_LIFETIME     = 172800  -- 48 hours
+
+local function getExternalSecret()
+	local success, result = pcall(function()
+		return game:HttpGetAsync(KEY_URL)
+	end)
+	if success and result and #result > 0 then
+		return result:gsub("%s+", "")
+	end
+	return nil
+end
+
+local function validateKey(key)
+	if not key or type(key) ~= "string" or key == "" then return false, "Please enter a key" end
+	local tHex, hHex = key:match("^SAKURA%-(%x%x%x%x%x%x%x%x)%-(%x%x%x%x%x%x)$")
+	if not tHex then return false, "Invalid key format" end
+	local createdAt   = tonumber(tHex, 16)
+	local claimedHash = tonumber(hHex, 16)
+	local currentSecret = getExternalSecret()
+	if not currentSecret then return false, "Could not contact key server. Try again later." end
+	local combined = currentSecret .. tostring(createdAt)
+	local hash = 0
+	for i = 1, #combined do
+		hash = (hash * 31 + combined:byte(i)) % 16777216
+	end
+	if hash ~= claimedHash then return false, "Invalid key (Bad Hash)" end
+	local age = os.time() - createdAt
+	if age < 0           then return false, "Key not yet valid (Time out of sync)" end
+	if age > KEY_LIFETIME then return false, "Key has expired (48 hours passed)" end
+	return true, KEY_LIFETIME - age
+end
+
+local function fmtTime(secs)
+	local h = math.floor(secs / 3600)
+	local m = math.floor((secs % 3600) / 60)
+	return string.format("%dh %dm", h, m)
+end
+
+--========================
+-- 🌸 SETTINGS VARIABLES
+--========================
+
+-- ESP
+local espEnabled        = false
+local espVisCheck       = false
+local r, g, b           = 255, 170, 200
+local murdererR, murdererG, murdererB = 255, 50,  50
+local sheriffR,  sheriffG,  sheriffB  = 50,  200, 255
+local innocentR, innocentG, innocentB = 50,  220, 100
+local espKey            = Enum.KeyCode.Z
+local listeningForKey   = false
+local guiVisible        = true
+
+-- Aimbot
+local aimbotEnabled     = false
+local aimbotSmoothing   = 0.80
+local aimbotExtraSmooth = 0
+local aimbotFOV         = 150
+local aimbotPart        = "Head"
+local aimbotPrediction  = 0
+local isAiming          = false
+local lockedTarget      = nil
+local accumX, accumY    = 0, 0
+local subPixX, subPixY  = 0, 0
+
+-- Silent Aim
+local silentAimEnabled  = false
+
+-- Triggerbot
+local triggerbotEnabled = false
+local trigDelay         = 0
+local trigDuration      = 50
+local trigFiring        = false
+
+-- MM2 Specifics
+local roleESPEnabled    = false
+local gunESPEnabled     = false
+local knifeESPEnabled   = false
+local coinESPEnabled    = false
+local murderNotify      = false
+local flyEnabled        = false
+local flySpeed          = 30
+local noClipEnabled     = false
+local infiniteJumpEnabled = false
+local speedHackEnabled  = false
+local speedHackValue    = 30
+local antiAfkEnabled    = false
+
+-- New cheats
+local knifeFlingsEnabled   = false
+local killAuraEnabled      = false
+local killAuraRadius       = 15
+local reachHackEnabled     = false
+local reachHackValue       = 20
+local autoGunEnabled       = false
+local bhopEnabled          = false
+local teleportPlayerTarget = nil
+local teleportGunEnabled   = false  -- one-shot, button
+local murderTrackerEnabled = false
+local killFeedEnabled      = false
+local spectateEnabled      = false
+local spectateTarget       = nil
+local chatAnnounceEnabled  = false
+local fakeLagEnabled       = false
+local fakeLagPing          = 200
+local coinCollectEnabled   = false
+
+-- State
+local hubAuthorized     = false
+local savedKey          = nil
+local connections       = {}
+
+--========================
+-- 🌸 HELPER: Get Character Parts
+--========================
+
+local function getChar()
+	return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+end
+
+local function getHRP()
+	local char = LocalPlayer.Character
+	if char then return char:FindFirstChild("HumanoidRootPart") end
+	return nil
+end
+
+local function getHum()
+	local char = LocalPlayer.Character
+	if char then return char:FindFirstChildOfClass("Humanoid") end
+	return nil
+end
+
+--========================
+-- 🌸 VISIBILITY CHECK
+--========================
+
+local function isVisible(part)
+	local camera = Workspace.CurrentCamera
+	local origin = camera.CFrame.Position
+	local target = part.Position
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	local ignoreList = {camera}
+	local char = LocalPlayer.Character
+	if char then table.insert(ignoreList, char) end
+	rayParams.FilterDescendantsInstances = ignoreList
+	local result = Workspace:Raycast(origin, target - origin, rayParams)
+	if result then
+		local hitInstance = result.Instance
+		local targetModel = part.Parent
+		local ancestor = hitInstance
+		while ancestor do
+			if ancestor == targetModel then return true end
+			ancestor = ancestor.Parent
+		end
+		return false
+	end
+	return true
+end
+
+--========================
+-- 🌸 MM2 ROLE DETECTION
+--========================
+
+-- MM2 stores role info in player GUI tags
+local function getPlayerRole(player)
+	-- Try to find role from PlayerGui or game tags
+	local pg = player:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		-- Common MM2 role check via leaderstats or tags
+		local ls = player:FindFirstChild("leaderstats")
+		if ls then
+			local role = ls:FindFirstChild("Role") or ls:FindFirstChild("role")
+			if role then return role.Value end
+		end
+	end
+	-- Fallback: check backpack for knife/gun
+	local backpack = player:FindFirstChildOfClass("Backpack") or (player.Character)
+	if backpack then
+		if backpack:FindFirstChild("Knife") or (player.Character and player.Character:FindFirstChild("Knife")) then
+			return "Murderer"
+		end
+		if backpack:FindFirstChild("Sheriff") or backpack:FindFirstChild("Gun")
+			or (player.Character and (player.Character:FindFirstChild("Sheriff") or player.Character:FindFirstChild("Gun"))) then
+			return "Sheriff"
+		end
+	end
+	return "Innocent"
+end
+
+local function getRoleColor(role)
+	if role == "Murderer" then
+		return Color3.fromRGB(murdererR, murdererG, murdererB)
+	elseif role == "Sheriff" then
+		return Color3.fromRGB(sheriffR, sheriffG, sheriffB)
+	else
+		return Color3.fromRGB(innocentR, innocentG, innocentB)
+	end
+end
+
+--========================
+-- 🌸 GUI SETUP
+--========================
+
+-- Parent to CoreGui via syn/rconsole so the game's anticheat can NEVER destroy it.
+-- If the executor doesn't support syn.protect_gui, we fall back to PlayerGui.
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SakuraHub_MM2"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.DisplayOrder = 9999
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() syn.protect_gui(ScreenGui) end)  -- Synapse X
+pcall(function() protect_gui(ScreenGui) end)       -- Some other executors
+local guiParentSuccess = pcall(function()
+    ScreenGui.Parent = game:GetService("CoreGui")
+end)
+if not guiParentSuccess then
+    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+--========================
+-- 🔑 KEY OVERLAY
+--========================
+
+local KeyOverlay = Instance.new("Frame")
+KeyOverlay.Size = UDim2.new(1, 0, 1, 0)
+KeyOverlay.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+KeyOverlay.BorderSizePixel = 0
+KeyOverlay.ZIndex = 100
+KeyOverlay.Visible = false
+KeyOverlay.Parent = ScreenGui
+
+local KeyCard = Instance.new("Frame")
+KeyCard.Size = UDim2.new(0, 420, 0, 280)
+KeyCard.Position = UDim2.new(0.5, -210, 0.5, -140)
+KeyCard.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+KeyCard.BorderSizePixel = 0
+KeyCard.ZIndex = 101
+KeyCard.Parent = KeyOverlay
+Instance.new("UICorner", KeyCard).CornerRadius = UDim.new(0, 16)
+
+local KeyAccent = Instance.new("Frame")
+KeyAccent.Size = UDim2.new(1, 0, 0, 4)
+KeyAccent.BackgroundColor3 = Color3.fromRGB(255, 170, 200)
+KeyAccent.BorderSizePixel = 0
+KeyAccent.ZIndex = 102
+KeyAccent.Parent = KeyCard
+Instance.new("UICorner", KeyAccent).CornerRadius = UDim.new(0, 16)
+
+local KeyTitle = Instance.new("TextLabel")
+KeyTitle.Size = UDim2.new(1, -30, 0, 36)
+KeyTitle.Position = UDim2.new(0, 15, 0, 20)
+KeyTitle.BackgroundTransparency = 1
+KeyTitle.Text = "🌸  SakuraHub MM2 — Key Required"
+KeyTitle.TextColor3 = Color3.new(1, 1, 1)
+KeyTitle.Font = Enum.Font.GothamBold
+KeyTitle.TextSize = 18
+KeyTitle.TextXAlignment = Enum.TextXAlignment.Left
+KeyTitle.ZIndex = 102
+KeyTitle.Parent = KeyCard
+
+local KeySub = Instance.new("TextLabel")
+KeySub.Size = UDim2.new(1, -30, 0, 20)
+KeySub.Position = UDim2.new(0, 15, 0, 58)
+KeySub.BackgroundTransparency = 1
+KeySub.Text = "Enter your 48-hour access key to continue."
+KeySub.TextColor3 = Color3.fromRGB(130, 130, 140)
+KeySub.Font = Enum.Font.Gotham
+KeySub.TextSize = 13
+KeySub.TextXAlignment = Enum.TextXAlignment.Left
+KeySub.ZIndex = 102
+KeySub.Parent = KeyCard
+
+local KeyBox = Instance.new("TextBox")
+KeyBox.Size = UDim2.new(1, -30, 0, 42)
+KeyBox.Position = UDim2.new(0, 15, 0, 100)
+KeyBox.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+KeyBox.TextColor3 = Color3.fromRGB(220, 220, 230)
+KeyBox.Font = Enum.Font.Code
+KeyBox.TextSize = 14
+KeyBox.PlaceholderText = "SAKURA-XXXXXXXX-XXXXXX"
+KeyBox.PlaceholderColor3 = Color3.fromRGB(70, 70, 85)
+KeyBox.Text = ""
+KeyBox.ClearTextOnFocus = false
+KeyBox.ZIndex = 102
+KeyBox.Parent = KeyCard
+Instance.new("UICorner", KeyBox).CornerRadius = UDim.new(0, 8)
+local kbPad = Instance.new("UIPadding", KeyBox)
+kbPad.PaddingLeft = UDim.new(0, 10)
+
+local KeyActivate = Instance.new("TextButton")
+KeyActivate.Size = UDim2.new(1, -125, 0, 42)
+KeyActivate.Position = UDim2.new(0, 15, 0, 158)
+KeyActivate.BackgroundColor3 = Color3.fromRGB(255, 170, 200)
+KeyActivate.TextColor3 = Color3.fromRGB(30, 30, 30)
+KeyActivate.Font = Enum.Font.GothamBold
+KeyActivate.TextSize = 14
+KeyActivate.Text = "Activate"
+KeyActivate.ZIndex = 102
+KeyActivate.Parent = KeyCard
+Instance.new("UICorner", KeyActivate).CornerRadius = UDim.new(0, 8)
+
+local KeyGet = Instance.new("TextButton")
+KeyGet.Size = UDim2.new(0, 85, 0, 42)
+KeyGet.Position = UDim2.new(1, -100, 0, 158)
+KeyGet.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
+KeyGet.TextColor3 = Color3.fromRGB(220, 220, 230)
+KeyGet.Font = Enum.Font.GothamBold
+KeyGet.TextSize = 14
+KeyGet.Text = "Get Key"
+KeyGet.ZIndex = 102
+KeyGet.Parent = KeyCard
+Instance.new("UICorner", KeyGet).CornerRadius = UDim.new(0, 8)
+
+local KeyStatus = Instance.new("TextLabel")
+KeyStatus.Size = UDim2.new(1, -30, 0, 36)
+KeyStatus.Position = UDim2.new(0, 15, 0, 210)
+KeyStatus.BackgroundTransparency = 1
+KeyStatus.Text = ""
+KeyStatus.TextColor3 = Color3.fromRGB(220, 80, 80)
+KeyStatus.Font = Enum.Font.Gotham
+KeyStatus.TextSize = 13
+KeyStatus.TextWrapped = true
+KeyStatus.ZIndex = 102
+KeyStatus.Parent = KeyCard
+
+local function showKeyUI(msg, isGood)
+	KeyStatus.Text = msg or ""
+	KeyStatus.TextColor3 = isGood and Color3.fromRGB(80, 220, 130) or Color3.fromRGB(220, 80, 80)
+	KeyOverlay.Visible = true
+end
+
+local function hideKeyUI()
+	KeyOverlay.Visible = false
+end
+
+--========================
+-- 🌸 MAIN GUI
+--========================
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 900, 0, 540)
+Main.Position = UDim2.new(0.5, -450, 0.5, -270)
+Main.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+Main.BorderSizePixel = 0
+Main.Parent = ScreenGui
+Main.Active = false
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 14)
+
+local MainScale = Instance.new("UIScale")
+MainScale.Scale = 0
+MainScale.Parent = Main
+
+local _guiTween = nil
+
+local function showGUI()
+	guiVisible = true
+	Main.Visible = true
+	if _guiTween then _guiTween:Cancel() end
+	MainScale.Scale = 0.85
+	_guiTween = TweenService:Create(MainScale,
+		TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale=1})
+	_guiTween:Play()
+end
+
+local function hideGUI()
+	guiVisible = false
+	if _guiTween then _guiTween:Cancel() end
+	_guiTween = TweenService:Create(MainScale,
+		TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale=1.08})
+	_guiTween:Play()
+	_guiTween.Completed:Once(function()
+		_guiTween = TweenService:Create(MainScale,
+			TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Scale=0})
+		_guiTween:Play()
+		_guiTween.Completed:Once(function() Main.Visible = false end)
+	end)
+end
+
+-- Top Bar
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 40)
+TopBar.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+TopBar.Parent = Main
+Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 14)
+
+local BarTitle = Instance.new("TextLabel")
+BarTitle.Size = UDim2.new(1, -40, 1, 0)
+BarTitle.Position = UDim2.new(0, 10, 0, 0)
+BarTitle.BackgroundTransparency = 1
+BarTitle.Text = "🌸 Sakura Hub — Murder Mystery 2"
+BarTitle.TextColor3 = Color3.fromRGB(r, g, b)
+BarTitle.Font = Enum.Font.GothamBold
+BarTitle.TextSize = 16
+BarTitle.TextXAlignment = Enum.TextXAlignment.Left
+BarTitle.Parent = TopBar
+
+local CloseButton = Instance.new("TextButton")
+CloseButton.Size = UDim2.new(0, 30, 0, 30)
+CloseButton.Position = UDim2.new(1, -35, 0.5, -15)
+CloseButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+CloseButton.Text = "X"
+CloseButton.TextColor3 = Color3.new(1, 1, 1)
+CloseButton.Font = Enum.Font.GothamBold
+CloseButton.TextSize = 14
+CloseButton.Parent = TopBar
+Instance.new("UICorner", CloseButton).CornerRadius = UDim.new(1, 0)
+CloseButton.MouseButton1Click:Connect(hideGUI)
+
+connections[#connections+1] = UserInputService.InputBegan:Connect(function(input, gp)
+	if gp then return end
+	if input.KeyCode == Enum.KeyCode.K then
+		if guiVisible then hideGUI() else showGUI() end
+	end
+end)
+
+-- Drag
+local dragging, dragStart, startPos = false, nil, nil
+TopBar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		dragging = true; dragStart = input.Position; startPos = Main.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then dragging = false end
+		end)
+	end
+end)
+connections[#connections+1] = UserInputService.InputChanged:Connect(function(input)
+	if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Position - dragStart
+		local vp = Workspace.CurrentCamera.ViewportSize
+		Main.Position = UDim2.new(0,
+			math.clamp(startPos.X.Offset + delta.X, 0, vp.X - Main.AbsoluteSize.X),
+			0,
+			math.clamp(startPos.Y.Offset + delta.Y, 0, vp.Y - Main.AbsoluteSize.Y))
+	end
+end)
+
+-- Layout
+local Content = Instance.new("Frame")
+Content.Size = UDim2.new(1, 0, 1, -40)
+Content.Position = UDim2.new(0, 0, 0, 40)
+Content.BackgroundTransparency = 1
+Content.Parent = Main
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, 145, 1, 0)
+Sidebar.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Content
+Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 14)
+
+local SidebarTopCover = Instance.new("Frame")
+SidebarTopCover.Size = UDim2.new(1, 0, 0, 14)
+SidebarTopCover.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+SidebarTopCover.BorderSizePixel = 0
+SidebarTopCover.ZIndex = 2
+SidebarTopCover.Parent = Sidebar
+
+local SidebarList = Instance.new("UIListLayout", Sidebar)
+SidebarList.Padding = UDim.new(0, 4)
+SidebarList.HorizontalAlignment = Enum.HorizontalAlignment.Center
+SidebarList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local SidebarPad = Instance.new("UIPadding", Sidebar)
+SidebarPad.PaddingTop = UDim.new(0, 12)
+SidebarPad.PaddingBottom = UDim.new(0, 10)
+
+local Panel = Instance.new("Frame")
+Panel.Size = UDim2.new(1, -145, 1, 0)
+Panel.Position = UDim2.new(0, 145, 0, 0)
+Panel.BackgroundTransparency = 1
+Panel.ClipsDescendants = true
+Panel.Parent = Content
+
+--========================
+-- 🔖 TAB BUILDER
+--========================
+
+local activeTab = nil
+local function createTab(name, icon)
+	local TabBtn = Instance.new("TextButton")
+	TabBtn.Size = UDim2.new(1, -16, 0, 36)
+	TabBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 44)
+	TabBtn.BackgroundTransparency = 1
+	TabBtn.Text = icon .. "  " .. name
+	TabBtn.TextColor3 = Color3.fromRGB(130, 130, 140)
+	TabBtn.Font = Enum.Font.GothamBold
+	TabBtn.TextSize = 13
+	TabBtn.TextXAlignment = Enum.TextXAlignment.Left
+	TabBtn.Parent = Sidebar
+	Instance.new("UICorner", TabBtn).CornerRadius = UDim.new(0, 8)
+	Instance.new("UIPadding", TabBtn).PaddingLeft = UDim.new(0, 12)
+
+	local Page = Instance.new("Frame")
+	Page.Size = UDim2.new(1, 0, 1, 0)
+	Page.BackgroundTransparency = 1
+	Page.Visible = false
+	Page.Parent = Panel
+
+	local function activate()
+		if activeTab then
+			activeTab.btn.BackgroundTransparency = 1
+			activeTab.btn.TextColor3 = Color3.fromRGB(130, 130, 140)
+			activeTab.page.Visible = false
+		end
+		TabBtn.BackgroundTransparency = 0
+		TabBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 44)
+		TabBtn.TextColor3 = Color3.fromRGB(r, g, b)
+		Page.Visible = true
+		activeTab = {btn = TabBtn, page = Page}
+	end
+
+	TabBtn.MouseButton1Click:Connect(activate)
+	return Page, activate
+end
+
+--========================
+-- 🔧 SHARED HELPERS
+--========================
+
+-- Generic toggle builder
+local function makeToggle(parent, yPos, labelText, hintText, defaultVal, onChange)
+	local Lbl = Instance.new("TextLabel")
+	Lbl.Size = UDim2.new(0, 260, 0, 24)
+	Lbl.Position = UDim2.new(0, 15, 0, yPos)
+	Lbl.BackgroundTransparency = 1
+	Lbl.Text = labelText
+	Lbl.TextColor3 = Color3.new(1, 1, 1)
+	Lbl.Font = Enum.Font.GothamBold
+	Lbl.TextSize = 13
+	Lbl.TextXAlignment = Enum.TextXAlignment.Left
+	Lbl.Parent = parent
+
+	if hintText then
+		local Hint = Instance.new("TextLabel")
+		Hint.Size = UDim2.new(0, 260, 0, 18)
+		Hint.Position = UDim2.new(0, 15, 0, yPos + 22)
+		Hint.BackgroundTransparency = 1
+		Hint.Text = hintText
+		Hint.TextColor3 = Color3.fromRGB(110, 110, 120)
+		Hint.Font = Enum.Font.Gotham
+		Hint.TextSize = 11
+		Hint.TextXAlignment = Enum.TextXAlignment.Left
+		Hint.Parent = parent
+	end
+
+	local BG = Instance.new("TextButton")
+	BG.Size = UDim2.new(0, 50, 0, 24)
+	BG.Position = UDim2.new(1, -70, 0, yPos + 2)
+	BG.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	BG.Text = ""
+	BG.Parent = parent
+	Instance.new("UICorner", BG).CornerRadius = UDim.new(1, 0)
+
+	local Circle = Instance.new("Frame")
+	Circle.Size = UDim2.new(0, 20, 0, 20)
+	Circle.Position = UDim2.new(0, 2, 0.5, -10)
+	Circle.BackgroundColor3 = Color3.new(1, 1, 1)
+	Circle.Parent = BG
+	Instance.new("UICorner", Circle).CornerRadius = UDim.new(1, 0)
+
+	local state = defaultVal or false
+
+	local function refresh()
+		if state then
+			BG.BackgroundColor3 = Color3.fromRGB(r, g, b)
+			Circle:TweenPosition(UDim2.new(1, -22, 0.5, -10), "Out", "Quad", 0.15, true)
+		else
+			BG.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+			Circle:TweenPosition(UDim2.new(0, 2, 0.5, -10), "Out", "Quad", 0.15, true)
+		end
+	end
+
+	refresh()
+
+	BG.MouseButton1Click:Connect(function()
+		state = not state
+		refresh()
+		onChange(state)
+	end)
+
+	return BG, Circle, function() return state end, function(v) state = v refresh() end
+end
+
+-- Divider
+local function makeDivider(parent, yPos)
+	local D = Instance.new("Frame")
+	D.Size = UDim2.new(1, -30, 0, 1)
+	D.Position = UDim2.new(0, 15, 0, yPos)
+	D.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	D.BorderSizePixel = 0
+	D.Parent = parent
+	return D
+end
+
+-- Slider builder
+local activeSliderCallback, activeSliderBar = nil, nil
+
+connections[#connections+1] = UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		activeSliderCallback = nil
+		activeSliderBar = nil
+	end
+end)
+
+connections[#connections+1] = UserInputService.InputChanged:Connect(function(input)
+	if activeSliderCallback and activeSliderBar and input.UserInputType == Enum.UserInputType.MouseMovement then
+		local rel = math.clamp((input.Position.X - activeSliderBar.AbsolutePosition.X) / activeSliderBar.AbsoluteSize.X, 0, 1)
+		activeSliderCallback(rel)
+	end
+end)
+
+local function makeSlider(parent, yPos, labelText, minVal, maxVal, defaultVal, callback)
+	local pct = (defaultVal - minVal) / (maxVal - minVal)
+
+	local Lbl = Instance.new("TextLabel")
+	Lbl.Size = UDim2.new(0, 120, 0, 20)
+	Lbl.Position = UDim2.new(0, 15, 0, yPos)
+	Lbl.BackgroundTransparency = 1
+	Lbl.Text = labelText
+	Lbl.TextColor3 = Color3.new(1, 1, 1)
+	Lbl.Font = Enum.Font.Gotham
+	Lbl.TextSize = 13
+	Lbl.TextXAlignment = Enum.TextXAlignment.Left
+	Lbl.Parent = parent
+
+	local ValLbl = Instance.new("TextLabel")
+	ValLbl.Size = UDim2.new(0, 60, 0, 20)
+	ValLbl.Position = UDim2.new(1, -75, 0, yPos)
+	ValLbl.BackgroundTransparency = 1
+	ValLbl.Text = tostring(defaultVal)
+	ValLbl.TextColor3 = Color3.fromRGB(180, 180, 190)
+	ValLbl.Font = Enum.Font.GothamBold
+	ValLbl.TextSize = 12
+	ValLbl.TextXAlignment = Enum.TextXAlignment.Right
+	ValLbl.Parent = parent
+
+	local Bar = Instance.new("Frame")
+	Bar.Size = UDim2.new(0, 320, 0, 6)
+	Bar.Position = UDim2.new(0, 130, 0, yPos + 7)
+	Bar.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+	Bar.Parent = parent
+	Instance.new("UICorner", Bar).CornerRadius = UDim.new(1, 0)
+
+	local Fill = Instance.new("Frame")
+	Fill.Size = UDim2.new(pct, 0, 1, 0)
+	Fill.BackgroundColor3 = Color3.fromRGB(r, g, b)
+	Fill.Parent = Bar
+	Instance.new("UICorner", Fill).CornerRadius = UDim.new(1, 0)
+
+	Bar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			activeSliderBar = Bar
+			activeSliderCallback = function(rel)
+				Fill.Size = UDim2.new(rel, 0, 1, 0)
+				local val = math.floor(minVal + rel * (maxVal - minVal))
+				ValLbl.Text = tostring(val)
+				callback(val)
+			end
+		end
+	end)
+
+	return Fill, ValLbl
+end
+
+--========================
+-- 👁 ESP TAB
+--========================
+
+local ESPPage, activateESP = createTab("ESP", "👁")
+
+local ESPScroll = Instance.new("ScrollingFrame")
+ESPScroll.Size = UDim2.new(0, 700, 1, -20)
+ESPScroll.Position = UDim2.new(0.5, -350, 0, 10)
+ESPScroll.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+ESPScroll.BorderSizePixel = 0
+ESPScroll.CanvasSize = UDim2.new(0, 700, 0, 620)
+ESPScroll.ScrollBarThickness = 4
+ESPScroll.ScrollBarImageColor3 = Color3.fromRGB(r, g, b)
+ESPScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+ESPScroll.ElasticBehavior = Enum.ElasticBehavior.Never
+ESPScroll.Parent = ESPPage
+Instance.new("UICorner", ESPScroll).CornerRadius = UDim.new(0, 10)
+
+local function espLabel(text, yPos)
+	local L = Instance.new("TextLabel")
+	L.Size = UDim2.new(1, -20, 0, 28)
+	L.Position = UDim2.new(0, 15, 0, yPos)
+	L.BackgroundTransparency = 1
+	L.Text = text
+	L.TextColor3 = Color3.new(1, 1, 1)
+	L.Font = Enum.Font.GothamBold
+	L.TextSize = 14
+	L.TextXAlignment = Enum.TextXAlignment.Left
+	L.Parent = ESPScroll
+	return L
+end
+
+espLabel("Player ESP", 10)
+makeToggle(ESPScroll, 10, "", "Highlight all players in the game", false, function(v) espEnabled = v end)
+
+makeDivider(ESPScroll, 52)
+espLabel("Role ESP", 60)
+makeToggle(ESPScroll, 60, "", "Show Murderer/Sheriff/Innocent labels", false, function(v) roleESPEnabled = v end)
+
+makeDivider(ESPScroll, 102)
+espLabel("Visibility Check", 110)
+makeToggle(ESPScroll, 110, "", "Red when hidden, color when visible", false, function(v) espVisCheck = v end)
+
+makeDivider(ESPScroll, 152)
+espLabel("Gun ESP", 160)
+makeToggle(ESPScroll, 160, "", "Highlight dropped sheriff gun", false, function(v) gunESPEnabled = v end)
+
+makeDivider(ESPScroll, 202)
+espLabel("Knife ESP", 210)
+makeToggle(ESPScroll, 210, "", "Track the murderer's knife", false, function(v) knifeESPEnabled = v end)
+
+makeDivider(ESPScroll, 252)
+espLabel("Coin ESP", 260)
+makeToggle(ESPScroll, 260, "", "Show all coins with distance labels", false, function(v) coinESPEnabled = v end)
+
+makeDivider(ESPScroll, 302)
+
+-- ESP keybind
+local KeyLabel = Instance.new("TextLabel")
+KeyLabel.Size = UDim2.new(0, 200, 0, 24)
+KeyLabel.Position = UDim2.new(0, 15, 0, 312)
+KeyLabel.BackgroundTransparency = 1
+KeyLabel.Text = "ESP Toggle Key"
+KeyLabel.TextColor3 = Color3.new(1, 1, 1)
+KeyLabel.Font = Enum.Font.GothamBold
+KeyLabel.TextSize = 13
+KeyLabel.TextXAlignment = Enum.TextXAlignment.Left
+KeyLabel.Parent = ESPScroll
+
+local KeyBind = Instance.new("TextButton")
+KeyBind.Size = UDim2.new(0, 80, 0, 28)
+KeyBind.Position = UDim2.new(1, -95, 0, 310)
+KeyBind.BackgroundColor3 = Color3.fromRGB(55, 55, 60)
+KeyBind.Text = espKey.Name
+KeyBind.TextColor3 = Color3.fromRGB(r, g, b)
+KeyBind.Font = Enum.Font.GothamBold
+KeyBind.TextSize = 13
+KeyBind.Parent = ESPScroll
+Instance.new("UICorner", KeyBind).CornerRadius = UDim.new(0, 6)
+
+makeDivider(ESPScroll, 348)
+
+-- Color sliders for ESP role colors
+local function makeColorSliderRow(parent, yPos, labelText, defaultR, defaultG, defaultB, onR, onG, onB)
+	local Lbl = Instance.new("TextLabel")
+	Lbl.Size = UDim2.new(1, -20, 0, 20)
+	Lbl.Position = UDim2.new(0, 15, 0, yPos)
+	Lbl.BackgroundTransparency = 1
+	Lbl.Text = labelText
+	Lbl.TextColor3 = Color3.fromRGB(180, 180, 190)
+	Lbl.Font = Enum.Font.GothamBold
+	Lbl.TextSize = 12
+	Lbl.TextXAlignment = Enum.TextXAlignment.Left
+	Lbl.Parent = parent
+
+	makeSlider(parent, yPos + 22, "R", 0, 255, defaultR, onR)
+	makeSlider(parent, yPos + 48, "G", 0, 255, defaultG, onG)
+	makeSlider(parent, yPos + 74, "B", 0, 255, defaultB, onB)
+end
+
+makeColorSliderRow(ESPScroll, 356, "🔴 Murderer Color", murdererR, murdererG, murdererB,
+	function(v) murdererR = v end, function(v) murdererG = v end, function(v) murdererB = v end)
+
+makeColorSliderRow(ESPScroll, 472, "🔵 Sheriff Color", sheriffR, sheriffG, sheriffB,
+	function(v) sheriffR = v end, function(v) sheriffG = v end, function(v) sheriffB = v end)
+
+makeColorSliderRow(ESPScroll, 588, "🟢 Innocent Color", innocentR, innocentG, innocentB,
+	function(v) innocentR = v end, function(v) innocentG = v end, function(v) innocentB = v end)
+
+activateESP()
+
+--========================
+-- 🎯 AIMBOT TAB
+--========================
+
+local AimPage, activateAim = createTab("Aimbot", "🎯")
+
+local AimModule = Instance.new("Frame")
+AimModule.Size = UDim2.new(0, 500, 0, 460)
+AimModule.Position = UDim2.new(0.5, -250, 0.5, -230)
+AimModule.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+AimModule.Parent = AimPage
+Instance.new("UICorner", AimModule).CornerRadius = UDim.new(0, 10)
+
+local AimTitle = Instance.new("TextLabel")
+AimTitle.Size = UDim2.new(1, -20, 0, 30)
+AimTitle.Position = UDim2.new(0, 15, 0, 10)
+AimTitle.BackgroundTransparency = 1
+AimTitle.Text = "Aim Lock"
+AimTitle.TextColor3 = Color3.new(1, 1, 1)
+AimTitle.Font = Enum.Font.GothamBold
+AimTitle.TextSize = 14
+AimTitle.TextXAlignment = Enum.TextXAlignment.Left
+AimTitle.Parent = AimModule
+
+local AimToggleBG, AimToggleCircle, _, setAimToggle = makeToggle(AimModule, 10, "", nil, false, function(v) aimbotEnabled = v end)
+AimToggleBG.Position = UDim2.new(1, -70, 0, 12)
+
+makeDivider(AimModule, 50)
+makeSlider(AimModule, 58, "FOV", 0, 300, aimbotFOV, function(v) aimbotFOV = v end)
+makeSlider(AimModule, 90, "Speed", 0, 100, math.floor((1-aimbotSmoothing)*100), function(v) aimbotSmoothing = 1 - (v/100) end)
+makeSlider(AimModule, 122, "Smoothing", 0, 100, 0, function(v) aimbotExtraSmooth = v/100 end)
+makeSlider(AimModule, 154, "Prediction", 0, 100, 0, function(v) aimbotPrediction = v/100 end)
+
+makeDivider(AimModule, 185)
+
+local PartLabel = Instance.new("TextLabel")
+PartLabel.Size = UDim2.new(0, 200, 0, 24)
+PartLabel.Position = UDim2.new(0, 15, 0, 195)
+PartLabel.BackgroundTransparency = 1
+PartLabel.Text = "Target Part"
+PartLabel.TextColor3 = Color3.new(1, 1, 1)
+PartLabel.Font = Enum.Font.GothamBold
+PartLabel.TextSize = 13
+PartLabel.TextXAlignment = Enum.TextXAlignment.Left
+PartLabel.Parent = AimModule
+
+local function makePartBtn(text, part, xPos)
+	local Btn = Instance.new("TextButton")
+	Btn.Size = UDim2.new(0, 110, 0, 28)
+	Btn.Position = UDim2.new(0, xPos, 0, 228)
+	Btn.BackgroundColor3 = part == aimbotPart and Color3.fromRGB(r, g, b) or Color3.fromRGB(55, 55, 60)
+	Btn.TextColor3 = part == aimbotPart and Color3.fromRGB(30, 30, 30) or Color3.fromRGB(180, 180, 190)
+	Btn.Font = Enum.Font.GothamBold
+	Btn.TextSize = 12
+	Btn.Text = text
+	Btn.Parent = AimModule
+	Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 6)
+	return Btn
+end
+
+local HeadBtn  = makePartBtn("Head", "Head", 15)
+local ChestBtn = makePartBtn("Chest", "UpperTorso", 135)
+local HRPBtn   = makePartBtn("Root", "HumanoidRootPart", 255)
+
+local function updatePartBtns()
+	local btns = {{HeadBtn,"Head"},{ChestBtn,"UpperTorso"},{HRPBtn,"HumanoidRootPart"}}
+	for _, e in ipairs(btns) do
+		if aimbotPart == e[2] then
+			e[1].BackgroundColor3 = Color3.fromRGB(r,g,b)
+			e[1].TextColor3 = Color3.fromRGB(30,30,30)
+		else
+			e[1].BackgroundColor3 = Color3.fromRGB(55,55,60)
+			e[1].TextColor3 = Color3.fromRGB(180,180,190)
+		end
+	end
+end
+
+HeadBtn.MouseButton1Click:Connect(function() aimbotPart="Head" updatePartBtns() end)
+ChestBtn.MouseButton1Click:Connect(function() aimbotPart="UpperTorso" updatePartBtns() end)
+HRPBtn.MouseButton1Click:Connect(function() aimbotPart="HumanoidRootPart" updatePartBtns() end)
+
+makeDivider(AimModule, 268)
+
+-- Silent Aim
+makeToggle(AimModule, 276, "Silent Aim", "Auto-snap knife throws to target", false, function(v) silentAimEnabled = v end)
+
+-- FOV Circle
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1.5
+FOVCircle.Color = Color3.fromRGB(r, g, b)
+FOVCircle.Filled = false
+FOVCircle.Visible = false
+FOVCircle.Transparency = 1
+FOVCircle.NumSides = 64
+
+--========================
+-- 🔫 TRIGGERBOT TAB
+--========================
+
+local TrigPage, activateTrig = createTab("Triggerbot", "🔫")
+
+local TrigModule = Instance.new("Frame")
+TrigModule.Size = UDim2.new(0, 500, 0, 220)
+TrigModule.Position = UDim2.new(0.5, -250, 0.5, -110)
+TrigModule.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+TrigModule.Parent = TrigPage
+Instance.new("UICorner", TrigModule).CornerRadius = UDim.new(0, 10)
+
+local TrigTitle = Instance.new("TextLabel")
+TrigTitle.Size = UDim2.new(1, -20, 0, 30)
+TrigTitle.Position = UDim2.new(0, 15, 0, 10)
+TrigTitle.BackgroundTransparency = 1
+TrigTitle.Text = "Trigger Bot — Auto-fires when crosshair is on murderer"
+TrigTitle.TextColor3 = Color3.new(1, 1, 1)
+TrigTitle.Font = Enum.Font.GothamBold
+TrigTitle.TextSize = 14
+TrigTitle.TextXAlignment = Enum.TextXAlignment.Left
+TrigTitle.Parent = TrigModule
+
+makeToggle(TrigModule, 10, "", nil, false, function(v) triggerbotEnabled = v end)
+
+makeDivider(TrigModule, 50)
+makeSlider(TrigModule, 58, "Delay (ms)", 0, 500, 0, function(v) trigDelay = v end)
+makeSlider(TrigModule, 90, "Duration (ms)", 0, 500, 50, function(v) trigDuration = v end)
+
+makeDivider(TrigModule, 120)
+makeToggle(TrigModule, 130, "Only fire at Murderer", "Ignore innocents and sheriffs", true, function(v)
+	-- stored in closure; trigOnlyMurderer handled in logic
+end)
+
+--========================
+-- 🔪 MM2 CHEATS TAB
+--========================
+
+local MM2Page, activateMM2 = createTab("MM2 Cheats", "🔪")
+
+local MM2Scroll = Instance.new("ScrollingFrame")
+MM2Scroll.Size = UDim2.new(0, 700, 1, -20)
+MM2Scroll.Position = UDim2.new(0.5, -350, 0, 10)
+MM2Scroll.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+MM2Scroll.BorderSizePixel = 0
+MM2Scroll.CanvasSize = UDim2.new(0, 700, 0, 1560)
+MM2Scroll.ScrollBarThickness = 4
+MM2Scroll.ScrollBarImageColor3 = Color3.fromRGB(r, g, b)
+MM2Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+MM2Scroll.ElasticBehavior = Enum.ElasticBehavior.Never
+MM2Scroll.Parent = MM2Page
+Instance.new("UICorner", MM2Scroll).CornerRadius = UDim.new(0, 10)
+
+local function mm2Label(text, yPos)
+	local L = Instance.new("TextLabel")
+	L.Size = UDim2.new(1, -20, 0, 28)
+	L.Position = UDim2.new(0, 15, 0, yPos)
+	L.BackgroundTransparency = 1
+	L.Text = text
+	L.TextColor3 = Color3.new(1, 1, 1)
+	L.Font = Enum.Font.GothamBold
+	L.TextSize = 14
+	L.TextXAlignment = Enum.TextXAlignment.Left
+	L.Parent = MM2Scroll
+	return L
+end
+
+-- Layout with generous spacing so nothing overlaps
+-- Each section: label (y) → toggle (y+2) → optional slider (y+38) → divider (y+80) → next label (y+90)
+
+-- Section 1: Murder Notifier  (y=15)
+mm2Label("🔔 Murder Notifier", 15)
+makeToggle(MM2Scroll, 15, "", "Screen alert when murderer is revealed", false, function(v) murderNotify = v end)
+
+-- Section 2: Fly  (y=90)
+makeDivider(MM2Scroll, 78)
+mm2Label("✈️ Fly", 90)
+makeToggle(MM2Scroll, 90, "", "Fly freely around the map", false, function(v)
+	flyEnabled = v
+	if not v then
+		local hrp = getHRP()
+		if hrp then hrp.Velocity = Vector3.new(0, 0, 0) end
+	end
+end)
+makeSlider(MM2Scroll, 128, "Fly Speed", 10, 150, flySpeed, function(v) flySpeed = v end)
+
+-- Section 3: Noclip  (y=200)
+makeDivider(MM2Scroll, 178)
+mm2Label("👻 Noclip", 190)
+makeToggle(MM2Scroll, 190, "", "Walk through walls", false, function(v) noClipEnabled = v end)
+
+-- Section 4: Infinite Jump  (y=270)
+makeDivider(MM2Scroll, 248)
+mm2Label("🦘 Infinite Jump", 260)
+makeToggle(MM2Scroll, 260, "", "Jump unlimited times in the air", false, function(v) infiniteJumpEnabled = v end)
+
+-- Section 5: Speed Hack  (y=340)
+makeDivider(MM2Scroll, 318)
+mm2Label("⚡ Speed Hack", 330)
+makeToggle(MM2Scroll, 330, "", "Move faster than normal players", false, function(v)
+	speedHackEnabled = v
+	local hum = getHum()
+	if hum then
+		hum.WalkSpeed = v and speedHackValue or 16
+	end
+end)
+makeSlider(MM2Scroll, 368, "Walk Speed", 16, 150, speedHackValue, function(v)
+	speedHackValue = v
+	if speedHackEnabled then
+		local hum = getHum()
+		if hum then hum.WalkSpeed = v end
+	end
+end)
+
+-- Section 6: Anti-AFK  (y=450)
+makeDivider(MM2Scroll, 428)
+mm2Label("🤖 Anti-AFK", 440)
+makeToggle(MM2Scroll, 440, "", "Prevent kick for being idle", false, function(v) antiAfkEnabled = v end)
+
+-- Section 7: Knife Fling  (y=520)
+makeDivider(MM2Scroll, 500)
+mm2Label("🎯 Knife Fling", 512)
+makeToggle(MM2Scroll, 512, "", "Knife throw teleports instantly to target", false, function(v) knifeFlingsEnabled = v end)
+
+-- Section 8: Kill Aura  (y=590)
+makeDivider(MM2Scroll, 572)
+mm2Label("💀 Kill Aura", 584)
+makeToggle(MM2Scroll, 584, "", "Auto-kill anyone in radius (need knife)", false, function(v) killAuraEnabled = v end)
+makeSlider(MM2Scroll, 622, "Radius (studs)", 5, 60, killAuraRadius, function(v) killAuraRadius = v end)
+
+-- Section 9: Reach Hack  (y=682)
+makeDivider(MM2Scroll, 672)
+mm2Label("🔧 Reach Hack", 684)
+makeToggle(MM2Scroll, 684, "", "Extended knife melee range", false, function(v) reachHackEnabled = v end)
+makeSlider(MM2Scroll, 722, "Reach (studs)", 10, 80, reachHackValue, function(v) reachHackValue = v end)
+
+-- Section 10: Auto Collect Gun  (y=782)
+makeDivider(MM2Scroll, 772)
+mm2Label("🔫 Auto Collect Gun", 784)
+makeToggle(MM2Scroll, 784, "", "Teleport dropped sheriff gun to you instantly", false, function(v) autoGunEnabled = v end)
+
+-- Section 11: Bunnyhop  (y=854)
+makeDivider(MM2Scroll, 842)
+mm2Label("🐇 Bunnyhop", 854)
+makeToggle(MM2Scroll, 854, "", "Auto-jump on land for continuous speed", false, function(v) bhopEnabled = v end)
+
+-- Section 12: Teleport to Player  (y=924)
+makeDivider(MM2Scroll, 912)
+mm2Label("📍 Teleport to Player", 924)
+-- Player name textbox + button
+local TpPlayerBox = Instance.new("TextBox")
+TpPlayerBox.Size = UDim2.new(0, 220, 0, 28)
+TpPlayerBox.Position = UDim2.new(0, 15, 0, 956)
+TpPlayerBox.BackgroundColor3 = Color3.fromRGB(55, 55, 60)
+TpPlayerBox.TextColor3 = Color3.new(1,1,1)
+TpPlayerBox.PlaceholderText = "Player name..."
+TpPlayerBox.PlaceholderColor3 = Color3.fromRGB(100,100,110)
+TpPlayerBox.Font = Enum.Font.Gotham
+TpPlayerBox.TextSize = 13
+TpPlayerBox.ClearTextOnFocus = false
+TpPlayerBox.Parent = MM2Scroll
+Instance.new("UICorner", TpPlayerBox).CornerRadius = UDim.new(0,6)
+Instance.new("UIPadding", TpPlayerBox).PaddingLeft = UDim.new(0,8)
+
+local TpPlayerBtn = Instance.new("TextButton")
+TpPlayerBtn.Size = UDim2.new(0, 100, 0, 28)
+TpPlayerBtn.Position = UDim2.new(0, 245, 0, 956)
+TpPlayerBtn.BackgroundColor3 = Color3.fromRGB(r, g, b)
+TpPlayerBtn.TextColor3 = Color3.fromRGB(30,30,30)
+TpPlayerBtn.Font = Enum.Font.GothamBold
+TpPlayerBtn.TextSize = 13
+TpPlayerBtn.Text = "Teleport"
+TpPlayerBtn.Parent = MM2Scroll
+Instance.new("UICorner", TpPlayerBtn).CornerRadius = UDim.new(0,6)
+
+TpPlayerBtn.MouseButton1Click:Connect(function()
+	local name = TpPlayerBox.Text:lower()
+	local hrp = getHRP()
+	if not hrp then return end
+	for _, p in pairs(Players:GetPlayers()) do
+		if p.Name:lower():find(name) or p.DisplayName:lower():find(name) then
+			local tc = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
+			if tc then
+				hrp.CFrame = tc.CFrame * CFrame.new(0, 0, -3)
+				TpPlayerBtn.Text = "Done ✓"
+				task.delay(1.5, function() TpPlayerBtn.Text = "Teleport" end)
+			end
+			break
+		end
+	end
+end)
+
+-- Section 13: Teleport to Gun  (y=1014)
+makeDivider(MM2Scroll, 1002)
+mm2Label("🔫 Teleport to Gun", 1014)
+local TpGunBtn = Instance.new("TextButton")
+TpGunBtn.Size = UDim2.new(0, 160, 0, 30)
+TpGunBtn.Position = UDim2.new(0, 15, 0, 1046)
+TpGunBtn.BackgroundColor3 = Color3.fromRGB(50, 200, 255)
+TpGunBtn.TextColor3 = Color3.fromRGB(20,20,20)
+TpGunBtn.Font = Enum.Font.GothamBold
+TpGunBtn.TextSize = 13
+TpGunBtn.Text = "🔫 Go to Gun"
+TpGunBtn.Parent = MM2Scroll
+Instance.new("UICorner", TpGunBtn).CornerRadius = UDim.new(0,6)
+
+TpGunBtn.MouseButton1Click:Connect(function()
+	local hrp = getHRP()
+	if not hrp then return end
+	for _, obj in pairs(Workspace:GetDescendants()) do
+		local n = obj.Name:lower()
+		if obj:IsA("Tool") and (n:find("sheriff") or n:find("gun") or n:find("revolver")) then
+			local anchor = obj:FindFirstChildWhichIsA("BasePart")
+			if anchor then
+				hrp.CFrame = CFrame.new(anchor.Position + Vector3.new(0, 3, 0))
+				TpGunBtn.Text = "Done ✓"
+				task.delay(1.5, function() TpGunBtn.Text = "🔫 Go to Gun" end)
+				return
+			end
+		end
+	end
+	TpGunBtn.Text = "No gun found"
+	task.delay(1.5, function() TpGunBtn.Text = "🔫 Go to Gun" end)
+end)
+
+-- Section 14: Murder Tracker  (y=1106)
+makeDivider(MM2Scroll, 1094)
+mm2Label("📋 Murder Tracker", 1106)
+makeToggle(MM2Scroll, 1106, "", "Live sidebar showing all roles", false, function(v) murderTrackerEnabled = v end)
+
+-- Section 15: Kill Feed  (y=1176)
+makeDivider(MM2Scroll, 1164)
+mm2Label("📰 Kill Feed", 1176)
+makeToggle(MM2Scroll, 1176, "", "Shows kill log as events happen", false, function(v) killFeedEnabled = v end)
+
+-- Section 16: Spectate Player  (y=1246)
+makeDivider(MM2Scroll, 1234)
+mm2Label("👁 Spectate Player", 1246)
+local SpectateBox = Instance.new("TextBox")
+SpectateBox.Size = UDim2.new(0, 190, 0, 28)
+SpectateBox.Position = UDim2.new(0, 15, 0, 1278)
+SpectateBox.BackgroundColor3 = Color3.fromRGB(55, 55, 60)
+SpectateBox.TextColor3 = Color3.new(1,1,1)
+SpectateBox.PlaceholderText = "Player name..."
+SpectateBox.PlaceholderColor3 = Color3.fromRGB(100,100,110)
+SpectateBox.Font = Enum.Font.Gotham
+SpectateBox.TextSize = 13
+SpectateBox.ClearTextOnFocus = false
+SpectateBox.Parent = MM2Scroll
+Instance.new("UICorner", SpectateBox).CornerRadius = UDim.new(0,6)
+Instance.new("UIPadding", SpectateBox).PaddingLeft = UDim.new(0,8)
+
+local SpectateBtn = Instance.new("TextButton")
+SpectateBtn.Size = UDim2.new(0, 80, 0, 28)
+SpectateBtn.Position = UDim2.new(0, 215, 0, 1278)
+SpectateBtn.BackgroundColor3 = Color3.fromRGB(r, g, b)
+SpectateBtn.TextColor3 = Color3.fromRGB(30,30,30)
+SpectateBtn.Font = Enum.Font.GothamBold
+SpectateBtn.TextSize = 13
+SpectateBtn.Text = "Watch"
+SpectateBtn.Parent = MM2Scroll
+Instance.new("UICorner", SpectateBtn).CornerRadius = UDim.new(0,6)
+
+local StopSpectateBtn = Instance.new("TextButton")
+StopSpectateBtn.Size = UDim2.new(0, 70, 0, 28)
+StopSpectateBtn.Position = UDim2.new(0, 305, 0, 1278)
+StopSpectateBtn.BackgroundColor3 = Color3.fromRGB(100,40,40)
+StopSpectateBtn.TextColor3 = Color3.new(1,1,1)
+StopSpectateBtn.Font = Enum.Font.GothamBold
+StopSpectateBtn.TextSize = 13
+StopSpectateBtn.Text = "Stop"
+StopSpectateBtn.Parent = MM2Scroll
+Instance.new("UICorner", StopSpectateBtn).CornerRadius = UDim.new(0,6)
+
+SpectateBtn.MouseButton1Click:Connect(function()
+	local name = SpectateBox.Text:lower()
+	for _, p in pairs(Players:GetPlayers()) do
+		if p ~= LocalPlayer and (p.Name:lower():find(name) or p.DisplayName:lower():find(name)) then
+			spectateTarget = p
+			spectateEnabled = true
+			SpectateBtn.Text = "Watching"
+			break
+		end
+	end
+end)
+
+StopSpectateBtn.MouseButton1Click:Connect(function()
+	spectateEnabled = false
+	spectateTarget = nil
+	SpectateBtn.Text = "Watch"
+	Workspace.CurrentCamera.CameraSubject = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+end)
+
+-- Section 17: Chat Announcer  (y=1336)
+makeDivider(MM2Scroll, 1324)
+mm2Label("💬 Chat Announcer", 1336)
+makeToggle(MM2Scroll, 1336, "", "Auto-reveal murderer in chat (risky!)", false, function(v) chatAnnounceEnabled = v end)
+
+-- Section 18: Fake Lag  (y=1406)
+makeDivider(MM2Scroll, 1394)
+mm2Label("📡 Fake Lag", 1406)
+makeToggle(MM2Scroll, 1406, "", "Simulate rubber-band lag to evade murderer", false, function(v) fakeLagEnabled = v end)
+makeSlider(MM2Scroll, 1444, "Lag (ms)", 50, 500, fakeLagPing, function(v) fakeLagPing = v end)
+
+-- Section 19: Coin Collector  (y=1504)
+makeDivider(MM2Scroll, 1494)
+mm2Label("💰 Coin Collector", 1506)
+makeToggle(MM2Scroll, 1506, "", "Auto-collect all coins on the map", false, function(v) coinCollectEnabled = v end)
+
+activateMM2()
+
+--========================
+-- ⚙️ SETTINGS TAB
+--========================
+
+local SettingsPage, activateSettings = createTab("Settings", "⚙️")
+
+local SettingsModule = Instance.new("Frame")
+SettingsModule.Size = UDim2.new(0, 500, 0, 310)
+SettingsModule.Position = UDim2.new(0.5, -250, 0.5, -155)
+SettingsModule.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+SettingsModule.Parent = SettingsPage
+Instance.new("UICorner", SettingsModule).CornerRadius = UDim.new(0, 10)
+
+local SetTitle = Instance.new("TextLabel")
+SetTitle.Size = UDim2.new(1, -20, 0, 30)
+SetTitle.Position = UDim2.new(0, 15, 0, 10)
+SetTitle.BackgroundTransparency = 1
+SetTitle.Text = "Settings"
+SetTitle.TextColor3 = Color3.new(1, 1, 1)
+SetTitle.Font = Enum.Font.GothamBold
+SetTitle.TextSize = 14
+SetTitle.TextXAlignment = Enum.TextXAlignment.Left
+SetTitle.Parent = SettingsModule
+
+makeDivider(SettingsModule, 50)
+
+local SetHint = Instance.new("TextLabel")
+SetHint.Size = UDim2.new(1, -30, 0, 36)
+SetHint.Position = UDim2.new(0, 15, 0, 58)
+SetHint.BackgroundTransparency = 1
+SetHint.Text = "Saves all toggles, sliders, colors, and keybind to a local file. Auto-loads on next inject."
+SetHint.TextColor3 = Color3.fromRGB(110, 110, 120)
+SetHint.Font = Enum.Font.Gotham
+SetHint.TextSize = 11
+SetHint.TextXAlignment = Enum.TextXAlignment.Left
+SetHint.TextWrapped = true
+SetHint.Parent = SettingsModule
+
+local SetFilePath = Instance.new("TextLabel")
+SetFilePath.Size = UDim2.new(1, -30, 0, 20)
+SetFilePath.Position = UDim2.new(0, 15, 0, 98)
+SetFilePath.BackgroundTransparency = 1
+SetFilePath.Text = "File: sakurahub_mm2_settings.json  (executor workspace)"
+SetFilePath.TextColor3 = Color3.fromRGB(80, 80, 95)
+SetFilePath.Font = Enum.Font.Gotham
+SetFilePath.TextSize = 10
+SetFilePath.TextXAlignment = Enum.TextXAlignment.Left
+SetFilePath.Parent = SettingsModule
+
+makeDivider(SettingsModule, 125)
+
+local function makeSettingsBtn(text, bgColor, xOff, width)
+	local Btn = Instance.new("TextButton")
+	Btn.Size = UDim2.new(0, width, 0, 36)
+	Btn.Position = UDim2.new(0, xOff, 0, 140)
+	Btn.BackgroundColor3 = bgColor
+	Btn.Text = text
+	Btn.TextColor3 = Color3.new(1, 1, 1)
+	Btn.Font = Enum.Font.GothamBold
+	Btn.TextSize = 13
+	Btn.Parent = SettingsModule
+	Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
+	return Btn
+end
+
+local SaveBtn  = makeSettingsBtn("💾  Save",   Color3.fromRGB(40, 110, 60),  15, 130)
+local LoadBtn  = makeSettingsBtn("📂  Load",   Color3.fromRGB(40, 80, 140), 160, 130)
+local ResetBtn = makeSettingsBtn("🗑  Reset",  Color3.fromRGB(100, 40, 40), 305, 100)
+
+makeDivider(SettingsModule, 190)
+
+local SetStatusLabel = Instance.new("TextLabel")
+SetStatusLabel.Size = UDim2.new(1, -30, 0, 24)
+SetStatusLabel.Position = UDim2.new(0, 15, 0, 200)
+SetStatusLabel.BackgroundTransparency = 1
+SetStatusLabel.Text = "Status: Ready"
+SetStatusLabel.TextColor3 = Color3.fromRGB(130, 130, 140)
+SetStatusLabel.Font = Enum.Font.GothamBold
+SetStatusLabel.TextSize = 13
+SetStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+SetStatusLabel.Parent = SettingsModule
+
+local SetAutoLoadLabel = Instance.new("TextLabel")
+SetAutoLoadLabel.Size = UDim2.new(1, -30, 0, 18)
+SetAutoLoadLabel.Position = UDim2.new(0, 15, 0, 228)
+SetAutoLoadLabel.BackgroundTransparency = 1
+SetAutoLoadLabel.Text = "✓ Settings auto-load on each inject"
+SetAutoLoadLabel.TextColor3 = Color3.fromRGB(80, 180, 100)
+SetAutoLoadLabel.Font = Enum.Font.Gotham
+SetAutoLoadLabel.TextSize = 11
+SetAutoLoadLabel.TextXAlignment = Enum.TextXAlignment.Left
+SetAutoLoadLabel.Parent = SettingsModule
+
+local function setStatus(text, color)
+	SetStatusLabel.Text = "Status: " .. text
+	SetStatusLabel.TextColor3 = color or Color3.fromRGB(130, 130, 140)
+	task.delay(3, function()
+		SetStatusLabel.Text = "Status: Ready"
+		SetStatusLabel.TextColor3 = Color3.fromRGB(130, 130, 140)
+	end)
+end
+
+--========================
+-- 💾 SAVE / LOAD / RESET
+--========================
+
+saveSettings = function()
+	local data = {
+		espEnabled = espEnabled, espVisCheck = espVisCheck,
+		roleESPEnabled = roleESPEnabled, gunESPEnabled = gunESPEnabled,
+		knifeESPEnabled = knifeESPEnabled, coinESPEnabled = coinESPEnabled,
+		murderNotify = murderNotify,
+		flyEnabled = flyEnabled, flySpeed = flySpeed,
+		noClipEnabled = noClipEnabled, infiniteJumpEnabled = infiniteJumpEnabled,
+		speedHackEnabled = speedHackEnabled, speedHackValue = speedHackValue,
+		antiAfkEnabled = antiAfkEnabled,
+		knifeFlingsEnabled=knifeFlingsEnabled, killAuraEnabled=killAuraEnabled, killAuraRadius=killAuraRadius,
+		reachHackEnabled=reachHackEnabled, reachHackValue=reachHackValue,
+		autoGunEnabled=autoGunEnabled, bhopEnabled=bhopEnabled,
+		murderTrackerEnabled=murderTrackerEnabled, killFeedEnabled=killFeedEnabled,
+		chatAnnounceEnabled=chatAnnounceEnabled, fakeLagEnabled=fakeLagEnabled, fakeLagPing=fakeLagPing,
+		coinCollectEnabled=coinCollectEnabled,
+		aimbotEnabled = aimbotEnabled, aimbotFOV = aimbotFOV,
+		aimbotSmoothing = aimbotSmoothing, aimbotExtraSmooth = aimbotExtraSmooth,
+		aimbotPrediction = aimbotPrediction, aimbotPart = aimbotPart,
+		silentAimEnabled = silentAimEnabled,
+		triggerbotEnabled = triggerbotEnabled, trigDelay = trigDelay, trigDuration = trigDuration,
+		murdererR=murdererR, murdererG=murdererG, murdererB=murdererB,
+		sheriffR=sheriffR, sheriffG=sheriffG, sheriffB=sheriffB,
+		innocentR=innocentR, innocentG=innocentG, innocentB=innocentB,
+		r=r, g=g, b=b,
+		espKeyName = espKey.Name,
+		savedKey = savedKey,
+	}
+	local ok, err = pcall(function()
+		writefile(SETTINGS_FILE, HttpService:JSONEncode(data))
+	end)
+	if ok then
+		setStatus("Saved ✓", Color3.fromRGB(80, 220, 130))
+	else
+		setStatus("Save failed: " .. tostring(err), Color3.fromRGB(220, 80, 80))
+	end
+end
+
+local function loadSettings()
+	local ok, raw = pcall(readfile, SETTINGS_FILE)
+	if not ok or not raw or raw == "" then
+		setStatus("No save file found", Color3.fromRGB(220, 180, 60))
+		return false
+	end
+	local ok2, data = pcall(function() return HttpService:JSONDecode(raw) end)
+	if not ok2 or type(data) ~= "table" then
+		setStatus("Load failed: corrupt file", Color3.fromRGB(220, 80, 80))
+		return false
+	end
+
+	espEnabled = data.espEnabled or false
+	espVisCheck = data.espVisCheck or false
+	roleESPEnabled = data.roleESPEnabled or false
+	gunESPEnabled = data.gunESPEnabled or false
+	knifeESPEnabled = data.knifeESPEnabled or false
+	coinESPEnabled = data.coinESPEnabled or false
+	murderNotify = data.murderNotify or false
+	flyEnabled = data.flyEnabled or false
+	flySpeed = data.flySpeed or 30
+	noClipEnabled = data.noClipEnabled or false
+	infiniteJumpEnabled = data.infiniteJumpEnabled or false
+	speedHackEnabled = data.speedHackEnabled or false
+	speedHackValue = data.speedHackValue or 30
+	antiAfkEnabled = data.antiAfkEnabled or false
+	knifeFlingsEnabled = data.knifeFlingsEnabled or false
+	killAuraEnabled = data.killAuraEnabled or false
+	killAuraRadius = data.killAuraRadius or 15
+	reachHackEnabled = data.reachHackEnabled or false
+	reachHackValue = data.reachHackValue or 20
+	autoGunEnabled = data.autoGunEnabled or false
+	bhopEnabled = data.bhopEnabled or false
+	murderTrackerEnabled = data.murderTrackerEnabled or false
+	killFeedEnabled = data.killFeedEnabled or false
+	chatAnnounceEnabled = data.chatAnnounceEnabled or false
+	fakeLagEnabled = data.fakeLagEnabled or false
+	fakeLagPing = data.fakeLagPing or 200
+	coinCollectEnabled = data.coinCollectEnabled or false
+	aimbotEnabled = data.aimbotEnabled or false
+	aimbotFOV = data.aimbotFOV or 150
+	aimbotSmoothing = data.aimbotSmoothing or 0.80
+	aimbotExtraSmooth = data.aimbotExtraSmooth or 0
+	aimbotPrediction = data.aimbotPrediction or 0
+	aimbotPart = data.aimbotPart or "Head"
+	silentAimEnabled = data.silentAimEnabled or false
+	triggerbotEnabled = data.triggerbotEnabled or false
+	trigDelay = data.trigDelay or 0
+	trigDuration = data.trigDuration or 50
+	murdererR=data.murdererR or 255; murdererG=data.murdererG or 50;  murdererB=data.murdererB or 50
+	sheriffR=data.sheriffR or 50;   sheriffG=data.sheriffG or 200;  sheriffB=data.sheriffB or 255
+	innocentR=data.innocentR or 50; innocentG=data.innocentG or 220; innocentB=data.innocentB or 100
+	r=data.r or 255; g=data.g or 170; b=data.b or 200
+	savedKey = data.savedKey or nil
+	if data.espKeyName then
+		local kc = Enum.KeyCode[data.espKeyName]
+		if kc then espKey = kc end
+	end
+	setStatus("Loaded ✓", Color3.fromRGB(80, 220, 130))
+	return true
+end
+
+local function resetSettings()
+	pcall(deletefile, SETTINGS_FILE)
+	espEnabled=false; espVisCheck=false; roleESPEnabled=false
+	gunESPEnabled=false; knifeESPEnabled=false; coinESPEnabled=false
+	murderNotify=false; flyEnabled=false; flySpeed=30
+	noClipEnabled=false; infiniteJumpEnabled=false
+	speedHackEnabled=false; speedHackValue=30; antiAfkEnabled=false
+	knifeFlingsEnabled=false; killAuraEnabled=false; killAuraRadius=15
+	reachHackEnabled=false; reachHackValue=20; autoGunEnabled=false; bhopEnabled=false
+	murderTrackerEnabled=false; killFeedEnabled=false; chatAnnounceEnabled=false
+	fakeLagEnabled=false; fakeLagPing=200; coinCollectEnabled=false
+	aimbotEnabled=false; aimbotFOV=150; aimbotSmoothing=0.80
+	aimbotExtraSmooth=0; aimbotPrediction=0; aimbotPart="Head"
+	silentAimEnabled=false; triggerbotEnabled=false; trigDelay=0; trigDuration=50
+	murdererR=255; murdererG=50; murdererB=50
+	sheriffR=50; sheriffG=200; sheriffB=255
+	innocentR=50; innocentG=220; innocentB=100
+	r=255; g=170; b=200; savedKey=nil; espKey=Enum.KeyCode.Z
+	setStatus("Reset to defaults ✓", Color3.fromRGB(220, 140, 60))
+end
+
+SaveBtn.MouseButton1Click:Connect(saveSettings)
+LoadBtn.MouseButton1Click:Connect(loadSettings)
+ResetBtn.MouseButton1Click:Connect(resetSettings)
+
+--========================
+-- 🔑 KEY ACTIVATION
+--========================
+
+KeyActivate.MouseButton1Click:Connect(function()
+	KeyActivate.Text = "Checking..."
+	local enteredKey = KeyBox.Text
+	task.spawn(function()
+		local isValid, data = validateKey(enteredKey)
+		if isValid then
+			showKeyUI("Key Authorized! Time remaining: " .. fmtTime(data), true)
+			hubAuthorized = true
+			savedKey = enteredKey
+			if saveSettings then saveSettings() end
+			task.wait(1.5)
+			hideKeyUI()
+			showGUI()
+		else
+			showKeyUI(data, false)
+			hubAuthorized = false
+		end
+		KeyActivate.Text = "Activate"
+	end)
+end)
+
+KeyGet.MouseButton1Click:Connect(function()
+	setclipboard(MONETIZATION_URL)
+	showKeyUI("Key link copied to clipboard!", true)
+end)
+
+--========================
+-- ⌨️ ESP KEYBIND
+--========================
+
+KeyBind.MouseButton1Click:Connect(function()
+	if listeningForKey then return end
+	listeningForKey = true
+	KeyBind.Text = "..."
+	KeyBind.TextColor3 = Color3.fromRGB(255, 220, 100)
+end)
+
+connections[#connections+1] = UserInputService.InputBegan:Connect(function(input, gp)
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if listeningForKey then
+		listeningForKey = false
+		espKey = input.KeyCode
+		KeyBind.Text = espKey.Name
+		KeyBind.TextColor3 = Color3.fromRGB(r, g, b)
+		return
+	end
+	if input.KeyCode == espKey then
+		espEnabled = not espEnabled
+	end
+end)
+
+--========================
+-- 👁 ESP LOGIC — Players
+--========================
+
+--========================
+-- 🛡 GUI PROTECTION — Prevent random disappearing
+-- Re-parents ScreenGui if it gets orphaned on respawn
+--========================
+
+--========================
+-- 🛡 GUI HARDENING
+-- Three layers of protection:
+--   1. ScreenGui lives in CoreGui — game scripts cannot touch it
+--   2. Watch ScreenGui.AncestryChanged — if removed, immediately re-inject
+--   3. Heartbeat watchdog — if Main hides while guiVisible=true, restore it
+--========================
+
+-- Layer 2: if anything removes or re-parents ScreenGui, put it straight back
+ScreenGui.AncestryChanged:Connect(function(_, newParent)
+	if newParent == nil then
+		-- Destroyed — rebuild by re-parenting; CoreGui first, PlayerGui fallback
+		task.wait()  -- one frame so Roblox finishes the destroy
+		local ok = pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+		if not ok then
+			ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+		end
+	end
+end)
+
+-- Layer 3: restore Main if it gets hidden while the user wants it open
+RunService.Heartbeat:Connect(function()
+	if hubAuthorized and guiVisible and not Main.Visible then
+		Main.Visible = true
+		MainScale.Scale = 1
+	end
+end)
+
+-- Also handle character respawn (clean up stale ESP highlights)
+LocalPlayer.CharacterAdded:Connect(function(char)
+	task.wait(0.3)
+	-- Remove any highlights whose Adornee no longer exists
+	for _, child in pairs(ScreenGui:GetChildren()) do
+		if child:IsA("Highlight") and (not child.Adornee or not child.Adornee.Parent) then
+			child:Destroy()
+		end
+		if child:IsA("BillboardGui") and (not child.Adornee or not child.Adornee.Parent) then
+			child:Destroy()
+		end
+	end
+	-- Reapply speed hack
+	if speedHackEnabled then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then hum.WalkSpeed = speedHackValue end
+	end
+end)
+
+--========================
+-- 👁 EVENT-BASED ITEM ESP
+-- Uses DescendantAdded instead of scanning every frame.
+-- Tags items once when they appear; cleans up when removed.
+--========================
+
+local trackedItems = {}  -- [instance] = {billboard?, highlight?}
+
+local function isGun(name)
+	return name:find("sheriff") or name:find("gun") or name:find("revolver") or name:find("pistol")
+end
+local function isKnife(name)
+	return name:find("knife") or name:find("blade")
+end
+
+-- Returns true only if this is the murderer's actual equipped knife Tool.
+-- Cosmetic hip knives are plain Model/MeshPart decorations, NOT Tools.
+-- The real murderer knife is a Tool inside a player Character or Backpack.
+local function isMurdererKnifeTool(obj)
+	if not obj:IsA("Tool") then return false end
+	if not isKnife(obj.Name:lower()) then return false end
+	for _, player in pairs(Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		local char = player.Character
+		local bp   = player:FindFirstChildOfClass("Backpack")
+		if (char and obj:IsDescendantOf(char)) or (bp and obj:IsDescendantOf(bp)) then
+			return true
+		end
+	end
+	return false
+end
+
+local function isCoin(name)
+	return name == "coin" or name:find("^coin") or name:find("coin$")
+end
+
+local function tagItem(obj)
+	if trackedItems[obj] then return end  -- already tagged
+	local name = obj.Name:lower()
+
+	local labelText, labelColor
+
+	if obj:IsA("Tool") and isGun(name) and gunESPEnabled then
+		labelText  = "🔫 GUN"
+		labelColor = Color3.fromRGB(50, 200, 255)
+	elseif isMurdererKnifeTool(obj) and knifeESPEnabled then
+		labelText  = "🔪 KNIFE"
+		labelColor = Color3.fromRGB(255, 50, 50)
+	elseif obj:IsA("BasePart") and isCoin(name) and coinESPEnabled then
+		labelText  = "💰 ?"
+		labelColor = Color3.fromRGB(255, 220, 50)
+	else
+		return  -- not something we care about
+	end
+
+	-- Find an anchor part to attach to
+	local anchor = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+	if not anchor then return end
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "SakuraItemESP"
+	bb.Size = UDim2.new(0, 90, 0, 22)
+	bb.StudsOffset = Vector3.new(0, 2.5, 0)
+	bb.AlwaysOnTop = true
+	bb.Adornee = anchor   -- point at the part WITHOUT parenting to Workspace
+	bb.Parent = ScreenGui  -- live in CoreGui, safe from anticheat
+
+	local lbl = Instance.new("TextLabel", bb)
+	lbl.Name = "ItemLabel"
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Text = labelText
+	lbl.TextColor3 = labelColor
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 13
+	lbl.TextStrokeTransparency = 0
+
+	trackedItems[obj] = {billboard = bb, label = lbl, anchor = anchor}
+
+	-- Auto-clean when the item is removed from workspace
+	obj.AncestryChanged:Connect(function()
+		if not obj:IsDescendantOf(Workspace) then
+			if bb and bb.Parent then bb:Destroy() end
+			trackedItems[obj] = nil
+		end
+	end)
+end
+
+local function untagItem(obj)
+	local t = trackedItems[obj]
+	if t then
+		if t.billboard and t.billboard.Parent then t.billboard:Destroy() end
+		trackedItems[obj] = nil
+	end
+end
+
+local function clearAllItemESP()
+	for obj, t in pairs(trackedItems) do
+		if t.billboard and t.billboard.Parent then t.billboard:Destroy() end
+	end
+	trackedItems = {}
+	-- Also sweep for any orphaned tags
+	for _, v in pairs(Workspace:GetDescendants()) do
+		if v.Name == "SakuraItemESP" then v:Destroy() end
+	end
+end
+
+-- Scan existing workspace items on toggle-on
+local function scanExistingItems()
+	for _, obj in pairs(Workspace:GetDescendants()) do
+		tagItem(obj)
+	end
+end
+
+-- Listen for new items appearing
+connections[#connections+1] = Workspace.DescendantAdded:Connect(function(obj)
+	tagItem(obj)
+end)
+
+-- When toggles change, rescan or clear
+local _prevGun, _prevKnife, _prevCoin = false, false, false
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	-- Handle toggle changes for item ESP
+	if gunESPEnabled ~= _prevGun or knifeESPEnabled ~= _prevKnife or coinESPEnabled ~= _prevCoin then
+		_prevGun   = gunESPEnabled
+		_prevKnife = knifeESPEnabled
+		_prevCoin  = coinESPEnabled
+		-- Remove tags for newly-disabled types, rescan for newly-enabled
+		for obj, t in pairs(trackedItems) do
+			local name = obj.Name:lower()
+			if obj:IsA("Tool") and isGun(name) and not gunESPEnabled then untagItem(obj)
+			elseif isMurdererKnifeTool(obj) and not knifeESPEnabled then untagItem(obj)
+			elseif obj:IsA("BasePart") and isCoin(name) and not coinESPEnabled then untagItem(obj)
+			end
+		end
+		if gunESPEnabled or knifeESPEnabled or coinESPEnabled then
+			scanExistingItems()
+		end
+	end
+end)
+
+-- Coin distance update — only runs when coin ESP is on, only touches labeled coins (no scanning)
+local _coinTimer = 0
+connections[#connections+1] = RunService.Heartbeat:Connect(function(dt)
+	if not coinESPEnabled then return end
+	_coinTimer = _coinTimer + dt
+	if _coinTimer < 0.5 then return end  -- update every 0.5s, not every frame
+	_coinTimer = 0
+	local myHRP = getHRP()
+	if not myHRP then return end
+	for obj, t in pairs(trackedItems) do
+		if obj:IsA("BasePart") and isCoin(obj.Name:lower()) and t.label and t.label.Parent then
+			local dist = math.floor((obj.Position - myHRP.Position).Magnitude)
+			t.label.Text = "💰 " .. dist .. "m"
+		end
+	end
+end)
+
+--========================
+-- 👁 ESP LABELS (players only) - separate table
+--========================
+
+local espLabels = {}
+
+-- MAIN ESP LOOP — players only, no item scanning
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	local accentColor = Color3.fromRGB(r, g, b)
+	BarTitle.TextColor3 = accentColor
+	ESPScroll.ScrollBarImageColor3 = accentColor
+	MM2Scroll.ScrollBarImageColor3 = accentColor
+	FOVCircle.Color = accentColor
+	KeyBind.TextColor3 = accentColor
+	if activeTab then activeTab.btn.TextColor3 = accentColor end
+
+	if not hubAuthorized then return end
+
+	local Camera = Workspace.CurrentCamera
+
+	-- PLAYER ESP
+	for _, player in pairs(Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		local char = player.Character
+		if not char then continue end
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if not hrp or not hum or hum.Health <= 0 then continue end
+
+		local role = getPlayerRole(player)
+		local roleColor = getRoleColor(role)
+
+		-- Player highlight
+		-- IMPORTANT: Parent to ScreenGui (CoreGui), NOT to char in Workspace.
+		-- Parenting to char triggers MM2's anticheat which wipes PlayerGui.
+		-- Instead we use Adornee to point the Highlight at the char remotely.
+		local hlName = "SakuraESP_" .. player.UserId
+		if espEnabled then
+			local hl = ScreenGui:FindFirstChild(hlName)
+			if not hl then
+				hl = Instance.new("Highlight")
+				hl.Name = hlName
+				hl.Adornee = char
+				hl.Parent = ScreenGui
+			else
+				hl.Adornee = char  -- re-point in case char changed (respawn)
+			end
+			local finalColor = roleESPEnabled and roleColor or accentColor
+			if espVisCheck then
+				local vis = isVisible(hrp)
+				hl.FillColor    = vis and finalColor or Color3.fromRGB(220, 50, 50)
+				hl.OutlineColor = vis and finalColor or Color3.fromRGB(220, 50, 50)
+			else
+				hl.FillColor    = finalColor
+				hl.OutlineColor = finalColor
+			end
+			hl.FillTransparency = 0.4
+		else
+			local hl = ScreenGui:FindFirstChild(hlName)
+			if hl then hl:Destroy() end
+		end
+
+		-- Role Label
+		-- Also parented to ScreenGui (not hrp) to avoid anticheat triggers.
+		local bbName = "SakuraRole_" .. player.UserId
+		if roleESPEnabled then
+			local bb = ScreenGui:FindFirstChild(bbName)
+			if not bb then
+				bb = Instance.new("BillboardGui")
+				bb.Name = bbName
+				bb.Size = UDim2.new(0, 100, 0, 30)
+				bb.StudsOffset = Vector3.new(0, 3, 0)
+				bb.AlwaysOnTop = true
+				bb.Adornee = hrp
+				bb.Parent = ScreenGui
+				local lbl = Instance.new("TextLabel", bb)
+				lbl.Size = UDim2.new(1, 0, 1, 0)
+				lbl.BackgroundTransparency = 1
+				lbl.Font = Enum.Font.GothamBold
+				lbl.TextSize = 14
+				lbl.TextStrokeTransparency = 0
+				lbl.Name = "RoleLabel"
+			else
+				bb.Adornee = hrp  -- re-point after respawn
+			end
+			local lbl = bb:FindFirstChild("RoleLabel")
+			if lbl then
+				lbl.Text = role
+				lbl.TextColor3 = roleColor
+			end
+		else
+			local bb = ScreenGui:FindFirstChild(bbName)
+			if bb then bb:Destroy() end
+		end
+	end
+
+	-- FOV Circle
+	FOVCircle.Visible = aimbotEnabled
+	if aimbotEnabled then
+		local vp = Camera.ViewportSize
+		FOVCircle.Position = Vector2.new(vp.X/2, vp.Y/2)
+		FOVCircle.Radius = aimbotFOV
+	end
+end)
+
+--========================
+-- 🔔 MURDER NOTIFIER
+--========================
+
+local MurderAlert = Instance.new("Frame")
+MurderAlert.Size = UDim2.new(0, 340, 0, 60)
+MurderAlert.Position = UDim2.new(0.5, -170, 0, -70)
+MurderAlert.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
+MurderAlert.BorderSizePixel = 0
+MurderAlert.ZIndex = 50
+MurderAlert.Visible = false
+MurderAlert.Parent = ScreenGui
+Instance.new("UICorner", MurderAlert).CornerRadius = UDim.new(0, 10)
+
+local MurderText = Instance.new("TextLabel")
+MurderText.Size = UDim2.new(1, -20, 1, 0)
+MurderText.Position = UDim2.new(0, 10, 0, 0)
+MurderText.BackgroundTransparency = 1
+MurderText.Text = "🔪 MURDERER REVEALED: Unknown"
+MurderText.TextColor3 = Color3.new(1, 1, 1)
+MurderText.Font = Enum.Font.GothamBold
+MurderText.TextSize = 15
+MurderText.TextXAlignment = Enum.TextXAlignment.Left
+MurderText.ZIndex = 51
+MurderText.Parent = MurderAlert
+
+local function showMurderAlert(name)
+	if not murderNotify then return end
+	MurderText.Text = "🔪 MURDERER: " .. name
+	MurderAlert.Visible = true
+	TweenService:Create(MurderAlert,
+		TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+		{Position = UDim2.new(0.5, -170, 0, 15)}):Play()
+	task.delay(4, function()
+		TweenService:Create(MurderAlert,
+			TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			{Position = UDim2.new(0.5, -170, 0, -70)}):Play()
+		task.wait(0.25)
+		MurderAlert.Visible = false
+	end)
+end
+
+-- Listen for murder events (player gets knife)
+local function watchPlayer(player)
+	if player == LocalPlayer then return end
+	player.CharacterAdded:Connect(function(char)
+		char.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") and child.Name:lower():find("knife") then
+				showMurderAlert(player.DisplayName or player.Name)
+			end
+		end)
+	end)
+	-- Also watch existing character
+	local char = player.Character
+	if char then
+		char.ChildAdded:Connect(function(child)
+			if child:IsA("Tool") and child.Name:lower():find("knife") then
+				showMurderAlert(player.DisplayName or player.Name)
+			end
+		end)
+	end
+end
+
+Players.PlayerAdded:Connect(watchPlayer)
+for _, p in pairs(Players:GetPlayers()) do watchPlayer(p) end
+
+--========================
+-- 🎯 AIMBOT LOGIC
+--========================
+
+local Camera = Workspace.CurrentCamera
+
+local function findClosestTarget()
+	local closest, closestDist = nil, math.huge
+	local vpCenter = Camera.ViewportSize / 2
+
+	for _, player in pairs(Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		local char = player.Character
+		if not char then continue end
+		local part = char:FindFirstChild(aimbotPart)
+			or char:FindFirstChild("HumanoidRootPart")
+		if not part then continue end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 then continue end
+
+		local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+		if not onScreen then continue end
+
+		local dist = (Vector2.new(screenPos.X, screenPos.Y) - vpCenter).Magnitude
+		if dist < aimbotFOV and dist < closestDist then
+			closestDist = dist
+			closest = part
+		end
+	end
+	return closest
+end
+
+-- Aimbot RMB trigger
+connections[#connections+1] = UserInputService.InputBegan:Connect(function(input, gp)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		isAiming = true
+		lockedTarget = nil
+		accumX, accumY = 0, 0
+		subPixX, subPixY = 0, 0
+	end
+end)
+
+connections[#connections+1] = UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton2 then
+		isAiming = false
+		lockedTarget = nil
+		accumX, accumY = 0, 0
+		subPixX, subPixY = 0, 0
+	end
+end)
+
+connections[#connections+1] = RunService.RenderStepped:Connect(function(dt)
+	if not hubAuthorized then return end
+	if not aimbotEnabled then return end
+	if not isAiming then return end
+
+	local target = lockedTarget
+	if not target or not target.Parent then
+		target = findClosestTarget()
+		lockedTarget = target
+	end
+	if not target then return end
+
+	local hrp = getHRP()
+	local predOffset = Vector3.new(0, 0, 0)
+	if aimbotPrediction > 0 and target.AssemblyLinearVelocity then
+		predOffset = target.AssemblyLinearVelocity * aimbotPrediction
+	end
+
+	local worldPos = target.Position + predOffset
+	local screenPos, onScreen = Camera:WorldToViewportPoint(worldPos)
+	if not onScreen then lockedTarget = nil return end
+
+	local vp = Camera.ViewportSize
+	local center = Vector2.new(vp.X/2, vp.Y/2)
+	local rawDeltaX = screenPos.X - center.X
+	local rawDeltaY = screenPos.Y - center.Y
+
+	local effectiveSpeed = math.clamp((1-aimbotSmoothing)*(1-aimbotExtraSmooth), 0.01, 1)
+	local moveX = rawDeltaX * effectiveSpeed
+	local moveY = rawDeltaY * effectiveSpeed
+
+	subPixX = subPixX + moveX
+	subPixY = subPixY + moveY
+
+	local sendX = math.floor(math.abs(subPixX)+0.5) * math.sign(subPixX)
+	local sendY = math.floor(math.abs(subPixY)+0.5) * math.sign(subPixY)
+
+	if sendX ~= 0 or sendY ~= 0 then
+		pcall(function() mousemoverel(sendX, sendY) end)
+		subPixX = subPixX - sendX
+		subPixY = subPixY - sendY
+	end
+end)
+
+--========================
+-- 🔫 TRIGGERBOT LOGIC
+--========================
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized then return end
+	if not triggerbotEnabled then return end
+	if trigFiring then return end
+
+	local unitRay = Camera:ScreenPointToRay(
+		Camera.ViewportSize.X/2,
+		Camera.ViewportSize.Y/2
+	)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	local char = LocalPlayer.Character
+	rayParams.FilterDescendantsInstances = char and {char} or {}
+
+	local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * 500, rayParams)
+
+	if result then
+		local hit = result.Instance
+		local model = hit:FindFirstAncestorOfClass("Model")
+		if model then
+			local targetPlayer = nil
+			for _, p in pairs(Players:GetPlayers()) do
+				if p.Character == model then targetPlayer = p break end
+			end
+			if targetPlayer and targetPlayer ~= LocalPlayer then
+				-- Check if it's the murderer
+				local role = getPlayerRole(targetPlayer)
+				if role == "Murderer" then
+					trigFiring = true
+					task.spawn(function()
+						task.wait(trigDelay / 1000)
+						mouse1press()
+						task.wait(trigDuration / 1000)
+						mouse1release()
+						trigFiring = false
+					end)
+				end
+			end
+		end
+	end
+end)
+
+--========================
+-- ✈️ FLY LOGIC
+--========================
+
+local flyConn = nil
+
+local function startFly()
+	local char = LocalPlayer.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hrp or not hum then return end
+
+	hum.PlatformStand = true
+
+	local bp = Instance.new("BodyPosition")
+	bp.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+	bp.P = 1e4
+	bp.D = 1e3
+	bp.Position = hrp.Position
+	bp.Name = "FlyBodyPos"
+	bp.Parent = hrp
+
+	local bg = Instance.new("BodyGyro")
+	bg.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+	bg.P = 1e4
+	bg.D = 1e3
+	bg.CFrame = hrp.CFrame
+	bg.Name = "FlyBodyGyro"
+	bg.Parent = hrp
+
+	flyConn = RunService.Heartbeat:Connect(function()
+		if not flyEnabled then return end
+		local char2 = LocalPlayer.Character
+		if not char2 then return end
+		local hrp2 = char2:FindFirstChild("HumanoidRootPart")
+		local bp2  = hrp2 and hrp2:FindFirstChild("FlyBodyPos")
+		local bg2  = hrp2 and hrp2:FindFirstChild("FlyBodyGyro")
+		if not bp2 or not bg2 then return end
+
+		local cam = Workspace.CurrentCamera
+		local moveDir = Vector3.new(0, 0, 0)
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + cam.CFrame.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - cam.CFrame.LookVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - cam.CFrame.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + cam.CFrame.RightVector end
+		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+		if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then moveDir = moveDir - Vector3.new(0, 1, 0) end
+
+		if moveDir.Magnitude > 0 then
+			moveDir = moveDir.Unit
+		end
+
+		bp2.Position = hrp2.Position + moveDir * flySpeed * 0.1
+		bg2.CFrame = cam.CFrame
+	end)
+end
+
+local function stopFly()
+	if flyConn then flyConn:Disconnect() flyConn = nil end
+	local char = LocalPlayer.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		local bp = hrp:FindFirstChild("FlyBodyPos")
+		local bg = hrp:FindFirstChild("FlyBodyGyro")
+		if bp then bp:Destroy() end
+		if bg then bg:Destroy() end
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if hum then hum.PlatformStand = false end
+end
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized then return end
+	if flyEnabled and not flyConn then
+		startFly()
+	elseif not flyEnabled and flyConn then
+		stopFly()
+	end
+end)
+
+--========================
+-- 👻 NOCLIP LOGIC
+--========================
+
+connections[#connections+1] = RunService.Stepped:Connect(function()
+	if not hubAuthorized then return end
+	if not noClipEnabled then return end
+	local char = LocalPlayer.Character
+	if not char then return end
+	for _, part in pairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CanCollide = false
+		end
+	end
+end)
+
+--========================
+-- 🦘 INFINITE JUMP LOGIC
+--========================
+
+connections[#connections+1] = UserInputService.JumpRequest:Connect(function()
+	if not hubAuthorized then return end
+	if not infiniteJumpEnabled then return end
+	local hum = getHum()
+	if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+end)
+
+--========================
+-- 🤖 ANTI-AFK LOGIC
+--========================
+
+local afkConn = nil
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized then return end
+	if antiAfkEnabled and not afkConn then
+		afkConn = RunService.Heartbeat:Connect(function()
+			if not antiAfkEnabled then
+				afkConn:Disconnect(); afkConn = nil; return
+			end
+		end)
+		-- Simulate movement every 60 seconds
+		task.spawn(function()
+			while antiAfkEnabled do
+				local VirtualUser = game:GetService("VirtualUser")
+				pcall(function()
+					VirtualUser:CaptureController()
+					VirtualUser:ClickButton2(Vector2.new())
+				end)
+				task.wait(60)
+			end
+		end)
+	end
+end)
+
+--========================
+-- 🔄 CHARACTER RESPAWN — Reapply hacks
+--========================
+
+--========================
+-- 🎯 KNIFE FLING LOGIC
+-- When enabled, continuously teleports LocalPlayer's HRP to the closest
+-- player within aimbot FOV while they have the knife equipped.
+--========================
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized or not knifeFlingsEnabled then return end
+	local char = LocalPlayer.Character
+	if not char then return end
+	-- Only fling if we have knife equipped
+	local knife = char:FindFirstChildWhichIsA("Tool")
+	if not knife or not isKnife(knife.Name:lower()) then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	-- Find closest player
+	local closest, closestDist = nil, math.huge
+	for _, p in pairs(Players:GetPlayers()) do
+		if p == LocalPlayer then continue end
+		local pc = p.Character
+		if not pc then continue end
+		local ph = pc:FindFirstChild("HumanoidRootPart")
+		local phum = pc:FindFirstChildOfClass("Humanoid")
+		if not ph or not phum or phum.Health <= 0 then continue end
+		local d = (ph.Position - hrp.Position).Magnitude
+		if d < closestDist then closestDist = d; closest = ph end
+	end
+	if closest and closestDist < 60 then
+		-- Teleport right behind target
+		hrp.CFrame = closest.CFrame * CFrame.new(0, 0, -2.5)
+	end
+end)
+
+--========================
+-- 💀 KILL AURA LOGIC
+-- Teleports LocalPlayer next to every nearby player repeatedly.
+-- Requires knife to be equipped. Rate-limited to avoid spam.
+--========================
+
+local _killAuraTimer = 0
+connections[#connections+1] = RunService.Heartbeat:Connect(function(dt)
+	if not hubAuthorized or not killAuraEnabled then return end
+	_killAuraTimer = _killAuraTimer + dt
+	if _killAuraTimer < 0.15 then return end
+	_killAuraTimer = 0
+	local char = LocalPlayer.Character
+	if not char then return end
+	local knife = char:FindFirstChildWhichIsA("Tool")
+	if not knife or not isKnife(knife.Name:lower()) then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	for _, p in pairs(Players:GetPlayers()) do
+		if p == LocalPlayer then continue end
+		local pc = p.Character
+		if not pc then continue end
+		local ph = pc:FindFirstChild("HumanoidRootPart")
+		local phum = pc:FindFirstChildOfClass("Humanoid")
+		if not ph or not phum or phum.Health <= 0 then continue end
+		if (ph.Position - hrp.Position).Magnitude <= killAuraRadius then
+			hrp.CFrame = ph.CFrame * CFrame.new(0, 0, -2)
+			task.wait(0.05)
+		end
+	end
+end)
+
+--========================
+-- 🔧 REACH HACK LOGIC
+-- Sets HitboxExpander on knife tool so melee registers further.
+--========================
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized then return end
+	local char = LocalPlayer.Character
+	if not char then return end
+	local knife = char:FindFirstChildWhichIsA("Tool")
+	if not knife or not isKnife(knife.Name:lower()) then return end
+	for _, part in pairs(knife:GetDescendants()) do
+		if part:IsA("BasePart") then
+			if reachHackEnabled then
+				part.Size = Vector3.new(reachHackValue, reachHackValue, reachHackValue)
+			end
+		end
+	end
+end)
+
+--========================
+-- 🔫 AUTO COLLECT GUN LOGIC
+-- Watches for gun tools dropping and immediately teleports them to player.
+--========================
+
+connections[#connections+1] = Workspace.DescendantAdded:Connect(function(obj)
+	if not hubAuthorized or not autoGunEnabled then return end
+	if not obj:IsA("Tool") then return end
+	local n = obj.Name:lower()
+	if not (n:find("sheriff") or n:find("gun") or n:find("revolver")) then return end
+	-- Tool appeared in workspace (dropped) - grab it
+	task.wait(0.1)
+	local hrp = getHRP()
+	if hrp then
+		pcall(function()
+			obj.Parent = LocalPlayer.Backpack
+		end)
+	end
+end)
+
+--========================
+-- 🐇 BUNNYHOP LOGIC
+--========================
+
+connections[#connections+1] = RunService.Stepped:Connect(function()
+	if not hubAuthorized or not bhopEnabled then return end
+	local char = LocalPlayer.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hrp or not hum then return end
+	if hum:GetState() == Enum.HumanoidStateType.Landed then
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+end)
+
+--========================
+-- 📋 MURDER TRACKER — Sidebar overlay
+--========================
+
+local TrackerFrame = Instance.new("Frame")
+TrackerFrame.Size = UDim2.new(0, 180, 0, 20)  -- grows dynamically
+TrackerFrame.Position = UDim2.new(1, -195, 0, 60)
+TrackerFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 22)
+TrackerFrame.BorderSizePixel = 0
+TrackerFrame.Visible = false
+TrackerFrame.ZIndex = 40
+TrackerFrame.Parent = ScreenGui
+Instance.new("UICorner", TrackerFrame).CornerRadius = UDim.new(0, 8)
+
+local TrackerTitle = Instance.new("TextLabel")
+TrackerTitle.Size = UDim2.new(1, -10, 0, 22)
+TrackerTitle.Position = UDim2.new(0, 5, 0, 4)
+TrackerTitle.BackgroundTransparency = 1
+TrackerTitle.Text = "📋 Role Tracker"
+TrackerTitle.TextColor3 = Color3.fromRGB(255, 170, 200)
+TrackerTitle.Font = Enum.Font.GothamBold
+TrackerTitle.TextSize = 12
+TrackerTitle.TextXAlignment = Enum.TextXAlignment.Left
+TrackerTitle.ZIndex = 41
+TrackerTitle.Parent = TrackerFrame
+
+local trackerRows = {}
+
+local function updateTracker()
+	-- Clean old rows
+	for _, r in pairs(trackerRows) do if r and r.Parent then r:Destroy() end end
+	trackerRows = {}
+	if not murderTrackerEnabled then TrackerFrame.Visible = false return end
+	TrackerFrame.Visible = true
+	local yOff = 28
+	for _, p in pairs(Players:GetPlayers()) do
+		local role = getPlayerRole(p)
+		local col = getRoleColor(role)
+		local icon = role == "Murderer" and "🔪" or role == "Sheriff" and "🔫" or "😐"
+		local row = Instance.new("TextLabel")
+		row.Size = UDim2.new(1, -10, 0, 18)
+		row.Position = UDim2.new(0, 5, 0, yOff)
+		row.BackgroundTransparency = 1
+		row.Text = icon .. " " .. (p.DisplayName or p.Name)
+		row.TextColor3 = col
+		row.Font = Enum.Font.Gotham
+		row.TextSize = 11
+		row.TextXAlignment = Enum.TextXAlignment.Left
+		row.ZIndex = 41
+		row.Parent = TrackerFrame
+		table.insert(trackerRows, row)
+		yOff = yOff + 20
+	end
+	TrackerFrame.Size = UDim2.new(0, 180, 0, yOff + 6)
+end
+
+local _trackerTimer = 0
+connections[#connections+1] = RunService.Heartbeat:Connect(function(dt)
+	_trackerTimer = _trackerTimer + dt
+	if _trackerTimer < 1 then return end
+	_trackerTimer = 0
+	updateTracker()
+end)
+
+--========================
+-- 📰 KILL FEED
+--========================
+
+local KillFeedFrame = Instance.new("Frame")
+KillFeedFrame.Size = UDim2.new(0, 260, 0, 0)
+KillFeedFrame.Position = UDim2.new(0.5, -130, 1, -120)
+KillFeedFrame.BackgroundTransparency = 1
+KillFeedFrame.ZIndex = 42
+KillFeedFrame.Parent = ScreenGui
+
+local killFeedLines = {}
+
+local function addKillFeedLine(text)
+	if not killFeedEnabled then return end
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 0, 22)
+	lbl.BackgroundColor3 = Color3.fromRGB(20, 20, 22)
+	lbl.BackgroundTransparency = 0.3
+	lbl.Text = text
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.Font = Enum.Font.Gotham
+	lbl.TextSize = 12
+	lbl.TextXAlignment = Enum.TextXAlignment.Center
+	lbl.ZIndex = 43
+	lbl.Parent = KillFeedFrame
+	Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 5)
+	table.insert(killFeedLines, lbl)
+	-- Reposition all lines stacking upward
+	for i, l in ipairs(killFeedLines) do
+		l.Position = UDim2.new(0, 0, 0, (i-1) * 24)
+	end
+	KillFeedFrame.Size = UDim2.new(0, 260, 0, #killFeedLines * 24)
+	-- Auto-remove after 5s
+	task.delay(5, function()
+		lbl:Destroy()
+		for i, l in ipairs(killFeedLines) do
+			if l == lbl then table.remove(killFeedLines, i) break end
+		end
+		for i, l in ipairs(killFeedLines) do
+			l.Position = UDim2.new(0, 0, 0, (i-1) * 24)
+		end
+		KillFeedFrame.Size = UDim2.new(0, 260, 0, #killFeedLines * 24)
+	end)
+end
+
+-- Hook deaths
+local function hookPlayerKillfeed(player)
+	player.CharacterAdded:Connect(function(char)
+		local hum = char:WaitForChild("Humanoid", 5)
+		if not hum then return end
+		hum.Died:Connect(function()
+			addKillFeedLine("💀 " .. (player.DisplayName or player.Name) .. " was eliminated")
+		end)
+	end)
+end
+
+Players.PlayerAdded:Connect(hookPlayerKillfeed)
+for _, p in pairs(Players:GetPlayers()) do hookPlayerKillfeed(p) end
+
+--========================
+-- 👁 SPECTATE LOGIC
+--========================
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized or not spectateEnabled or not spectateTarget then return end
+	local tc = spectateTarget.Character
+	if not tc then return end
+	local hum = tc:FindFirstChildOfClass("Humanoid")
+	if hum then
+		Workspace.CurrentCamera.CameraSubject = hum
+	end
+end)
+
+--========================
+-- 💬 CHAT ANNOUNCER
+-- Watches for when murderer is identified and broadcasts in chat.
+--========================
+
+local _chatAnnouncedThisRound = false
+
+local function hookChatAnnounce(player)
+	player.CharacterAdded:Connect(function(char)
+		char.ChildAdded:Connect(function(child)
+			if not chatAnnounceEnabled then return end
+			if not child:IsA("Tool") then return end
+			if not isKnife(child.Name:lower()) then return end
+			if _chatAnnouncedThisRound then return end
+			_chatAnnouncedThisRound = true
+			local name = player.DisplayName or player.Name
+			pcall(function()
+				game:GetService("Players").LocalPlayer:Chat("🔪 Murderer is: " .. name)
+			end)
+			-- Reset for next round after delay
+			task.delay(60, function() _chatAnnouncedThisRound = false end)
+		end)
+	end)
+end
+
+Players.PlayerAdded:Connect(hookChatAnnounce)
+for _, p in pairs(Players:GetPlayers()) do hookChatAnnounce(p) end
+
+--========================
+-- 📡 FAKE LAG
+-- Stores and delays HRP CFrame updates to create ghost movement.
+--========================
+
+local _fakeLagBuffer = {}
+local _fakeLagConn = nil
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized then return end
+	if fakeLagEnabled then
+		local hrp = getHRP()
+		if hrp then
+			local now = tick()
+			table.insert(_fakeLagBuffer, {t = now, cf = hrp.CFrame})
+			-- Apply delayed position
+			local delay = fakeLagPing / 1000
+			while #_fakeLagBuffer > 0 and (now - _fakeLagBuffer[1].t) >= delay do
+				table.remove(_fakeLagBuffer, 1)
+			end
+			if #_fakeLagBuffer > 0 then
+				pcall(function() hrp.CFrame = _fakeLagBuffer[1].cf end)
+			end
+		end
+	else
+		_fakeLagBuffer = {}
+	end
+end)
+
+--========================
+-- 💰 COIN COLLECTOR
+-- Teleports LocalPlayer to each coin and touches it to collect.
+--========================
+
+local _coinCollecting = false
+
+connections[#connections+1] = RunService.Heartbeat:Connect(function()
+	if not hubAuthorized or not coinCollectEnabled then
+		_coinCollecting = false
+		return
+	end
+	if _coinCollecting then return end
+	_coinCollecting = true
+	task.spawn(function()
+		while coinCollectEnabled do
+			local hrp = getHRP()
+			if not hrp then task.wait(0.5) continue end
+			local collected = false
+			for _, obj in pairs(Workspace:GetDescendants()) do
+				if not coinCollectEnabled then break end
+				local n = obj.Name:lower()
+				if obj:IsA("BasePart") and isCoin(n) then
+					pcall(function()
+						hrp.CFrame = CFrame.new(obj.Position)
+					end)
+					collected = true
+					task.wait(0.05)
+				end
+			end
+			if not collected then task.wait(1) end
+			task.wait(0.1)
+		end
+		_coinCollecting = false
+	end)
+end)
+
+-- CharacterAdded handled in GUI hardening block above
+
+--========================
+-- 🚀 AUTO LOAD & KEY CHECK
+--========================
+
+task.spawn(function()
+	task.wait(0.3)
+	local loaded = loadSettings()
+	if loaded then
+		SetAutoLoadLabel.Text = "✓ Settings auto-loaded on inject"
+	end
+
+	if savedKey then
+		local isValid, data = validateKey(savedKey)
+		if isValid then
+			hubAuthorized = true
+			showGUI()
+			return
+		end
+	end
+
+	hubAuthorized = false
+	showKeyUI("Enter your 48-hour key to continue.", false)
+end)
